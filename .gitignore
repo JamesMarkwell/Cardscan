@@ -1,0 +1,26 @@
+node_modules/
+build/
+dist/
+.expo/
+*.log
+
+# Generated native projects — recreated by `expo prebuild`.
+/app/android/
+/app/ios/
+
+# Local Cloudflare state
+.wrangler/
+.dev.vars
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Secrets never belong in the repo.
+.env
+.env.*
+!.env.example
+
+# Test photos are large; keep them out of git history (see testset/README.md).
+/testset/photos/

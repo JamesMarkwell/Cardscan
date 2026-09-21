@@ -1,0 +1,27 @@
+name = "cardscan-worker"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Daily, one hour before the fingerprint job in .github/workflows/fingerprint.yml.
+[triggers]
+crons = ["0 21 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cardscan"
+database_id = "replace-me-after-wrangler-d1-create"
+
+[[r2_buckets]]
+binding = "PACKS"
+bucket_name = "cardscan-packs"
+
+[[queues.producers]]
+binding = "FINGERPRINT_QUEUE"
+queue = "cardscan-fingerprint"
+
+[vars]
+USER_AGENT = "CardScan/0.1 (+https://github.com/JamesMarkwell/cardscan)"
+PUBLIC_BASE_URL = ""
+
+# WORKER_ADMIN_TOKEN is a secret: wrangler secret put WORKER_ADMIN_TOKEN
