@@ -39,7 +39,14 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - uses: android-actions/setup-android@v3
+      - name: Check the runner's Android SDK
+        # The ubuntu-latest image ships the SDK already. android-actions/setup-android
+        # is not used: it installs the long-removed "tools" package and fails.
+        run: |
+          set -euo pipefail
+          test -n "${ANDROID_HOME:-}" || { echo "ANDROID_HOME is not set"; exit 1; }
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Install dependencies
         run: npm ci
