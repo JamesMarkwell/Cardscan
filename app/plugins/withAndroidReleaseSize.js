@@ -23,8 +23,12 @@ const SPLITS_BLOCK = `
     splits {
         abi {
             reset()
-            enable (findProperty('android.enableAbiSplits') ?: 'true').toBoolean()
-            universalApk (findProperty('android.buildUniversalApk') ?: 'false').toBoolean()
+            // Property assignment, not the method form: AGP 8 dropped
+            // AbiSplitOptions.enable(boolean), so the bare "enable true" that
+            // React Native's own template still uses fails with
+            // "Could not find method enable() for arguments [true]".
+            enable = (findProperty('android.enableAbiSplits') ?: 'true').toBoolean()
+            universalApk = (findProperty('android.buildUniversalApk') ?: 'false').toBoolean()
             include(*((findProperty('reactNativeArchitectures') ?: '${DEFAULT_ABIS}').split(',')))
         }
     }
@@ -60,6 +64,27 @@ function setProperty(properties, key, value) {
   return [...properties, { type: 'property', key, value }];
 }
 
+/**
+ * Insert the splits block into a generated app/build.gradle. Pure and
+ * idempotent so it can be tested without running prebuild.
+ */
+function addAbiSplits(contents) {
+  if (contents.includes('android.enableAbiSplits')) {
+    return contents;
+  }
+
+  // Anchor on the start of the android block so the insert survives changes
+  // elsewhere in the generated file.
+  const anchor = /^android \{$/m;
+  if (!anchor.test(contents)) {
+    throw new Error(
+      'withAndroidReleaseSize: could not find the `android {` block in app/build.gradle',
+    );
+  }
+
+  return contents.replace(anchor, `android {\n${SPLITS_BLOCK}`);
+}
+
 const withAndroidReleaseSize = (config) => {
   config = withGradleProperties(config, (gradleConfig) => {
     for (const [key, value] of PROPERTIES) {
@@ -85,24 +110,12 @@ const withAndroidReleaseSize = (config) => {
   ]);
 
   return withAppBuildGradle(config, (gradleConfig) => {
-    const contents = gradleConfig.modResults.contents;
-
-    if (contents.includes('android.enableAbiSplits')) {
-      return gradleConfig;
-    }
-
-    // Anchor on the start of the android block so the insert survives changes
-    // elsewhere in the generated file.
-    const anchor = /^android \{$/m;
-    if (!anchor.test(contents)) {
-      throw new Error(
-        'withAndroidReleaseSize: could not find the `android {` block in app/build.gradle',
-      );
-    }
-
-    gradleConfig.modResults.contents = contents.replace(anchor, `android {\n${SPLITS_BLOCK}`);
+    gradleConfig.modResults.contents = addAbiSplits(gradleConfig.modResults.contents);
     return gradleConfig;
   });
 };
 
 module.exports = withAndroidReleaseSize;
+module.exports.addAbiSplits = addAbiSplits;
+module.exports.PROGUARD_RULES = PROGUARD_RULES;
+module.exports.GRADLE_PROPERTIES = PROPERTIES;
