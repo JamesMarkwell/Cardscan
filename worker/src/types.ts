@@ -1,7 +1,6 @@
 export interface Env {
   DB: D1Database;
   PACKS: R2Bucket;
-  FINGERPRINT_QUEUE?: Queue<FingerprintJob>;
   USER_AGENT: string;
   /** Minimum gap between requests to a source host. Defaults to 1000ms. */
   SOURCE_MIN_INTERVAL_MS?: string;
@@ -10,12 +9,6 @@ export interface Env {
 }
 
 export type GameId = 'pokemon' | 'onepiece' | 'mtg' | 'yugioh' | 'lorcana';
-
-export interface FingerprintJob {
-  printingId: string;
-  gameId: GameId;
-  imageUrl: string;
-}
 
 export interface SetRow {
   id: string;

@@ -16,10 +16,6 @@ database_id = "replace-me-after-wrangler-d1-create"
 binding = "PACKS"
 bucket_name = "cardscan-packs"
 
-[[queues.producers]]
-binding = "FINGERPRINT_QUEUE"
-queue = "cardscan-fingerprint"
-
 [vars]
 USER_AGENT = "CardScan/0.1 (+https://github.com/JamesMarkwell/cardscan)"
 # Left blank: the manifest then uses the origin of the incoming request, so a

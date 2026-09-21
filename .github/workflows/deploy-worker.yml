@@ -52,12 +52,27 @@ jobs:
           cache-dependency-path: worker/package-lock.json
 
       - name: Check the secrets are set
+        env:
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "${CLOUDFLARE_API_TOKEN:-}" || { echo "CLOUDFLARE_API_TOKEN is not set"; exit 1; }
-          test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || { echo "CLOUDFLARE_ACCOUNT_ID is not set"; exit 1; }
+          missing=""
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID D1_DATABASE_ID WORKER_ADMIN_TOKEN; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "Missing repository secrets:$missing"
+            echo "Add them under Settings -> Secrets and variables -> Actions."
+            echo "See the README section 'Deploying from GitHub Actions'."
+            exit 1
+          fi
+          echo "All four secrets are present."
 
       - run: npm ci
+
+      - name: Confirm the credentials work
+        run: npx wrangler whoami
 
       - name: Generate the wrangler config
         env:
@@ -82,6 +97,17 @@ jobs:
           url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -1)"
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "Deployed to $url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set the Worker's admin token
+        # After the deploy: `wrangler secret put` needs the Worker to exist.
+        # Secrets apply immediately, so no second deploy is needed.
+        env:
+          WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Idempotent: overwrites the stored secret with the same value.
+          printf '%s' "$WORKER_ADMIN_TOKEN" \
+            | npx wrangler secret put WORKER_ADMIN_TOKEN --config wrangler.generated.toml
 
       - name: Build the card database
         if: inputs.refresh

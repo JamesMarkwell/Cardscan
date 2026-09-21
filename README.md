@@ -113,6 +113,35 @@ re-run.
 
 It prints the worker URL and the admin token at the end. Keep the token.
 
+## Deploying from GitHub Actions
+
+**Actions → Deploy worker → Run workflow** deploys the Worker, stores its admin
+token, and builds the card database, with nothing installed locally.
+
+It needs four repository secrets, under
+**Settings → Secrets and variables → Actions → New repository secret**:
+
+| Secret | Where it comes from |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare dashboard → My Profile → API Tokens → Create Token |
+| `CLOUDFLARE_ACCOUNT_ID` | the hex string in any Cloudflare dashboard URL |
+| `D1_DATABASE_ID` | `npx wrangler d1 list`, the uuid for `cardscan` |
+| `WORKER_ADMIN_TOKEN` | invent one: `openssl rand -hex 32` |
+
+Use a **custom token** rather than a global key, with only these permissions:
+
+- Account → Workers Scripts → Edit
+- Account → D1 → Edit
+- Account → Workers R2 Storage → Edit
+
+The workflow checks all four secrets are present and runs `wrangler whoami`
+before it changes anything, so a missing or wrong secret fails in seconds with a
+message naming it rather than halfway through a deploy.
+
+`WORKER_ADMIN_TOKEN` is pushed into the Worker's own secrets after the deploy —
+`wrangler secret put` needs the Worker to exist first — so the one value covers
+both sides and nothing has to be set by hand.
+
 ### Why there is a generated config
 
 `wrangler.toml` is committed with a placeholder database id. The real id lives in
@@ -135,9 +164,7 @@ curl -X POST "<worker-url>/admin/refresh?game=onepiece" \
   -H "Authorization: Bearer <admin-token>"
 ```
 
-…or from GitHub: **Actions → Deploy worker → Run workflow**, which deploys and
-then imports. That needs `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and
-`WORKER_ADMIN_TOKEN` as repository secrets.
+…or from GitHub — see below.
 
 The first import walks every set in the game at one request per second, so it
 takes a while. After that the daily cron only fetches what changed.
