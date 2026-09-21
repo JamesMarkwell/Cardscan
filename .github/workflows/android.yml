@@ -8,9 +8,13 @@ on:
     inputs:
       variant:
         description: Build variant
-        default: debug
+        default: release
         type: choice
         options: [debug, release]
+      architectures:
+        description: Architectures to build (comma separated)
+        default: arm64-v8a
+        type: string
 
 concurrency:
   group: android-${{ github.ref }}
@@ -24,6 +28,12 @@ jobs:
     defaults:
       run:
         working-directory: app
+
+    env:
+      # Phones shipped in the last decade are arm64. Pushes build just that one;
+      # use "Run workflow" with all four when a wider set is needed.
+      ARCHITECTURES: ${{ inputs.architectures || 'arm64-v8a' }}
+      VARIANT: ${{ inputs.variant || 'debug' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -65,17 +75,31 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('app/android/**/*.gradle*', 'app/package-lock.json') }}
           restore-keys: gradle-${{ runner.os }}-
 
-      - name: Assemble ${{ inputs.variant || 'debug' }} APK
+      - name: Assemble
         working-directory: app/android
-        run: ./gradlew assemble${{ inputs.variant == 'release' && 'Release' || 'Debug' }} --no-daemon --stacktrace
+        run: |
+          set -euo pipefail
+          task="assemble$(python3 -c "print('${VARIANT}'.capitalize())")"
+          ./gradlew "$task" \
+            -PreactNativeArchitectures="${ARCHITECTURES}" \
+            --no-daemon --stacktrace
 
-      - name: Name the artifact
-        id: apk
-        run: echo "path=$(find android/app/build/outputs/apk -name '*.apk' | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Report APK sizes
+        run: |
+          set -euo pipefail
+          {
+            echo "### ${VARIANT} APKs (${ARCHITECTURES})"
+            echo
+            echo "| APK | Size |"
+            echo "| --- | ---- |"
+            find android/app/build/outputs/apk -name '*.apk' -printf '| %f | %s |\n' \
+              | awk -F'|' '{printf "|%s|%.1f MB |\n", $2, $3/1048576}'
+          } >> "$GITHUB_STEP_SUMMARY"
+          find android/app/build/outputs/apk -name '*.apk' -exec ls -lh {} +
 
       - uses: actions/upload-artifact@v4
         with:
           name: cardscan-${{ inputs.variant || 'debug' }}-apk
-          path: app/${{ steps.apk.outputs.path }}
+          path: app/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
           retention-days: 30

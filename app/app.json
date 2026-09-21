@@ -15,7 +15,10 @@
     },
     "android": {
       "package": "com.cardscan.app",
-      "permissions": ["android.permission.CAMERA", "android.permission.VIBRATE"],
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.VIBRATE"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#0B0E14",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -34,7 +37,8 @@
         {
           "cameraPermission": "CardScan uses the camera to identify trading cards. Images are processed on your phone and are not uploaded."
         }
-      ]
+      ],
+      "./plugins/withAndroidReleaseSize"
     ],
     "experiments": {
       "typedRoutes": false
