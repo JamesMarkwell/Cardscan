@@ -7,10 +7,10 @@ on:
   workflow_dispatch:
     inputs:
       variant:
-        description: Build variant
+        description: "Build variant (debug needs a Metro dev server; release is self-contained)"
         default: release
         type: choice
-        options: [debug, release]
+        options: [release, debug]
       architectures:
         description: Architectures to build (comma separated)
         default: arm64-v8a
@@ -33,7 +33,10 @@ jobs:
       # Phones shipped in the last decade are arm64. Pushes build just that one;
       # use "Run workflow" with all four when a wider set is needed.
       ARCHITECTURES: ${{ inputs.architectures || 'arm64-v8a' }}
-      VARIANT: ${{ inputs.variant || 'debug' }}
+      # Release, not debug: a debug APK contains no JS bundle (React Native
+      # skips bundling for debuggable variants) and expects a Metro dev server,
+      # so it opens and closes immediately when installed on its own.
+      VARIANT: ${{ inputs.variant || 'release' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +93,11 @@ jobs:
           {
             echo "### ${VARIANT} APKs (${ARCHITECTURES})"
             echo
+            if [ "$VARIANT" = "debug" ]; then
+              echo "> A debug APK carries no JS bundle. It needs \`npx expo start\`"
+              echo "> running and reachable, or it will close as soon as it opens."
+              echo
+            fi
             echo "| APK | Size |"
             echo "| --- | ---- |"
             find android/app/build/outputs/apk -name '*.apk' -printf '| %f | %s |\n' \
@@ -99,7 +107,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cardscan-${{ inputs.variant || 'debug' }}-apk
+          name: cardscan-${{ inputs.variant || 'release' }}-apk
           path: app/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
           retention-days: 30

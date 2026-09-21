@@ -37,9 +37,15 @@ lists and prices.
 ## Building the Android app
 
 The APK is built in CI — see [`.github/workflows/android.yml`](.github/workflows/android.yml).
-Every push builds a debug APK for `arm64-v8a` and attaches it to the run;
-**Actions → Android → Run workflow** builds a release variant, or a wider set of
+Every push builds a **release** APK for `arm64-v8a` and attaches it to the run;
+**Actions → Android → Run workflow** can build debug instead, or a wider set of
 architectures.
+
+Release, not debug, because React Native skips bundling the JavaScript into
+debuggable variants: a debug APK has no JS inside it and expects `npx expo start`
+to be running and reachable. Installed on its own it opens and closes again
+immediately. Use debug only alongside a dev server; install release to just run
+the app.
 
 APKs are split per ABI, so each one carries native libraries for a single
 architecture instead of all four. **Any phone from the last decade wants
