@@ -103,14 +103,28 @@ phone.
 One command, once:
 
 ```bash
-cd worker && ./scripts/bootstrap.sh
+cd worker && npx wrangler login && ./scripts/bootstrap.sh
 ```
 
-It creates the D1 database and the R2 bucket, writes the database id into
-`wrangler.toml` (commit that), applies the migrations, generates and stores an
-admin token, and deploys. Log in first with `npx wrangler login`.
+It creates the D1 database and the R2 bucket, records the database id in
+`worker/.env`, applies the migrations, generates and stores an admin token, and
+deploys. Every step is skipped if it has already been done, so it is safe to
+re-run.
 
 It prints the worker URL and the admin token at the end. Keep the token.
+
+### Why there is a generated config
+
+`wrangler.toml` is committed with a placeholder database id. The real id lives in
+`worker/.env` (gitignored) and `scripts/config.sh` writes
+`wrangler.generated.toml` from the two — which is the config every wrangler
+command then uses. Resource ids are not credentials, but they name resources in
+a specific Cloudflare account and this repository is public, so they stay out of
+it. Wrangler does not interpolate environment variables in its own config, which
+is why the substitution is done here.
+
+Copy `worker/.env.example` to `worker/.env` and fill it in, or let
+`bootstrap.sh` write it.
 
 ### Building the card database
 

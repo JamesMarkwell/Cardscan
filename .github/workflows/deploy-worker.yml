@@ -5,9 +5,11 @@ name: Deploy worker
 # Needs two repository secrets (Settings -> Secrets and variables -> Actions):
 #   CLOUDFLARE_API_TOKEN   a token with Workers Scripts:Edit, D1:Edit, R2:Edit
 #   CLOUDFLARE_ACCOUNT_ID  from the Cloudflare dashboard URL
+#   D1_DATABASE_ID         uuid of the cardscan D1 database
+#   WORKER_ADMIN_TOKEN     the token the /admin routes check
 #
-# Run worker/scripts/bootstrap.sh once first: it creates the D1 database and R2
-# bucket and writes the database id into wrangler.toml.
+# The database id is a secret here rather than a committed value because this
+# repository is public and the id names a resource in a specific account.
 
 on:
   workflow_dispatch:
@@ -55,29 +57,28 @@ jobs:
           test -n "${CLOUDFLARE_API_TOKEN:-}" || { echo "CLOUDFLARE_API_TOKEN is not set"; exit 1; }
           test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || { echo "CLOUDFLARE_ACCOUNT_ID is not set"; exit 1; }
 
-      - name: Check wrangler.toml has a real database id
+      - run: npm ci
+
+      - name: Generate the wrangler config
+        env:
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
         run: |
           set -euo pipefail
-          if grep -q 'replace-me-after-wrangler-d1-create' wrangler.toml; then
-            echo "wrangler.toml still has the placeholder database_id."
-            echo "Run worker/scripts/bootstrap.sh once and commit the change."
-            exit 1
-          fi
-
-      - run: npm ci
+          test -n "${D1_DATABASE_ID:-}" || { echo "D1_DATABASE_ID is not set"; exit 1; }
+          ./scripts/config.sh
 
       - name: Test before deploying
         run: npm run typecheck && npm test
 
       - name: Apply migrations
         if: inputs.migrate
-        run: npx wrangler d1 migrations apply cardscan --remote
+        run: npx wrangler d1 migrations apply cardscan --remote --config wrangler.generated.toml
 
       - name: Deploy
         id: deploy
         run: |
           set -euo pipefail
-          npx wrangler deploy 2>&1 | tee deploy.log
+          npx wrangler deploy --config wrangler.generated.toml 2>&1 | tee deploy.log
           url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -1)"
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "Deployed to $url" >> "$GITHUB_STEP_SUMMARY"

@@ -50,28 +50,27 @@ if [ -z "$DATABASE_ID" ]; then
 fi
 echo "database_id = $DATABASE_ID"
 
-say "Writing it into wrangler.toml"
-node -e "
-  const fs = require('fs');
-  const path = 'wrangler.toml';
-  const before = fs.readFileSync(path, 'utf8');
-  const after = before.replace(
-    /^database_id = .*$/m,
-    'database_id = \"' + process.env.DATABASE_ID + '\"',
-  );
-  if (before === after) {
-    console.log('wrangler.toml already up to date.');
-  } else {
-    fs.writeFileSync(path, after);
-    console.log('Updated wrangler.toml — commit this change.');
-  }
-" DATABASE_ID="$DATABASE_ID"
+say "Recording it in worker/.env"
+# .env is gitignored: resource ids are account-specific and this repo is public.
+if [ -f .env ] && grep -q '^D1_DATABASE_ID=' .env; then
+  node -e "
+    const fs = require('fs');
+    const before = fs.readFileSync('.env', 'utf8');
+    fs.writeFileSync('.env', before.replace(/^D1_DATABASE_ID=.*$/m, 'D1_DATABASE_ID=' + process.env.DATABASE_ID));
+  " DATABASE_ID="$DATABASE_ID"
+else
+  printf 'D1_DATABASE_ID=%s\n' "$DATABASE_ID" >> .env
+fi
+echo "worker/.env updated (not committed)."
 
 say "Creating the R2 bucket '$BUCKET_NAME' (skipped if it exists)"
 $WRANGLER r2 bucket create "$BUCKET_NAME" 2>/dev/null || echo "Already exists, carrying on."
 
+say "Generating wrangler.generated.toml"
+./scripts/config.sh
+
 say "Applying migrations"
-$WRANGLER d1 migrations apply "$DATABASE_NAME" --remote
+$WRANGLER d1 migrations apply "$DATABASE_NAME" --remote --config wrangler.generated.toml
 
 say "Setting the admin token"
 if [ -n "${WORKER_ADMIN_TOKEN:-}" ]; then
@@ -84,10 +83,10 @@ else
   echo "    WORKER_ADMIN_TOKEN=$TOKEN"
   echo
 fi
-printf '%s' "$TOKEN" | $WRANGLER secret put WORKER_ADMIN_TOKEN
+printf '%s' "$TOKEN" | $WRANGLER secret put WORKER_ADMIN_TOKEN --config wrangler.generated.toml
 
 say "Deploying"
-$WRANGLER deploy
+$WRANGLER deploy --config wrangler.generated.toml
 
 cat <<NEXT
 

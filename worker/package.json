@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "dev": "npm run config && wrangler dev --config wrangler.generated.toml",
+    "deploy": "npm run config && wrangler deploy --config wrangler.generated.toml",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
-    "migrate:local": "wrangler d1 migrations apply cardscan --local",
-    "migrate:remote": "wrangler d1 migrations apply cardscan --remote"
+    "migrate:local": "npm run config && wrangler d1 migrations apply cardscan --local --config wrangler.generated.toml",
+    "migrate:remote": "npm run config && wrangler d1 migrations apply cardscan --remote --config wrangler.generated.toml",
+    "config": "./scripts/config.sh"
   },
   "dependencies": {
     "hono": "^4.6.14"

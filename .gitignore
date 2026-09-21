@@ -11,6 +11,8 @@ dist/
 # Local Cloudflare state
 .wrangler/
 .dev.vars
+# Generated from wrangler.toml with the account's resource ids filled in.
+wrangler.generated.toml
 
 # Python
 __pycache__/
