@@ -16,8 +16,13 @@ const REFRESH_ORDER: GameId[] = ['onepiece', 'pokemon', 'mtg', 'yugioh', 'lorcan
 
 const app = new Hono<{ Bindings: Env }>();
 
-function packUrl(env: Env, key: string): string {
-  const base = env.PUBLIC_BASE_URL?.replace(/\/$/, '') ?? '';
+/**
+ * Absolute URL for a pack. PUBLIC_BASE_URL wins when set (a custom domain), and
+ * otherwise the origin of the request is used -- so a fresh deploy serves a
+ * usable manifest without anyone having to set a variable first.
+ */
+function packUrl(origin: string, env: Env, key: string): string {
+  const base = (env.PUBLIC_BASE_URL || origin).replace(/\/$/, '');
   return `${base}/packs/${key}`;
 }
 
@@ -40,6 +45,7 @@ app.get('/manifest.json', async (c) => {
     history.set(row.gameId, versions);
   }
 
+  const origin = new URL(c.req.url).origin;
   const manifest: Manifest = {
     version: new Date().toISOString().slice(0, 10),
     generatedAt: new Date().toISOString(),
@@ -49,16 +55,16 @@ app.get('/manifest.json', async (c) => {
       const deltas = versions.slice(1, 15).map((from, index) => ({
         from,
         to: versions[index],
-        url: packUrl(c.env, `games/${row.gameId}/delta-${from}-${versions[index]}.json`),
+        url: packUrl(origin, c.env, `games/${row.gameId}/delta-${from}-${versions[index]}.json`),
       }));
 
       return {
         game: row.gameId as GameId,
         version: row.version,
         printingsCount: row.printingsCount,
-        catalogUrl: packUrl(c.env, `games/${row.gameId}/catalog-${row.version}.json`),
-        indexUrl: packUrl(c.env, `games/${row.gameId}/index-${row.version}.bin`),
-        indexIdsUrl: packUrl(c.env, `games/${row.gameId}/index-${row.version}.ids`),
+        catalogUrl: packUrl(origin, c.env, `games/${row.gameId}/catalog-${row.version}.json`),
+        indexUrl: packUrl(origin, c.env, `games/${row.gameId}/index-${row.version}.bin`),
+        indexIdsUrl: packUrl(origin, c.env, `games/${row.gameId}/index-${row.version}.ids`),
         deltas,
       };
     }),
@@ -183,7 +189,10 @@ export async function runRefresh(env: Env, games: GameId[]): Promise<Record<stri
     .first<{ id: number }>();
 
   const reports: Record<string, unknown> = {};
-  const options = { userAgent: env.USER_AGENT, minIntervalMs: 1000 };
+  const options = {
+    userAgent: env.USER_AGENT,
+    minIntervalMs: Number(env.SOURCE_MIN_INTERVAL_MS ?? 1000),
+  };
 
   try {
     for (const game of games) {
@@ -239,4 +248,4 @@ export default {
   },
 };
 
-export { GAMES };
+export { GAMES, app };

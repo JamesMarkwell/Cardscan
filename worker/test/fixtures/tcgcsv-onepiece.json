@@ -1,0 +1,97 @@
+{
+  "_comment": "Shaped after TCGCSV's TCGplayer mirror (category 68 = One Piece). Trimmed to a handful of rows that cover the cases the importer has to get right: a normal card, a reprint of the same artwork in another set, a foil variant, a card numbered x/y, and a sealed product with no collector number.",
+  "groups": {
+    "success": true,
+    "errors": [],
+    "results": [
+      { "groupId": 23024, "name": "Wings of the Captain", "abbreviation": "OP06", "publishedOn": "2024-06-28T00:00:00" },
+      { "groupId": 23425, "name": "500 Years in the Future", "abbreviation": "OP07", "publishedOn": "2024-09-13T00:00:00" }
+    ]
+  },
+  "products": {
+    "23024": {
+      "success": true,
+      "errors": [],
+      "results": [
+        {
+          "productId": 545001,
+          "name": "Monkey.D.Luffy (Alternate Art)",
+          "cleanName": "Monkey D Luffy",
+          "imageUrl": "https://example.invalid/545001.jpg",
+          "groupId": 23024,
+          "extendedData": [
+            { "name": "Number", "displayName": "Number", "value": "OP06-069" },
+            { "name": "Rarity", "displayName": "Rarity", "value": "SR" }
+          ]
+        },
+        {
+          "productId": 545002,
+          "name": "Nami (Foil)",
+          "cleanName": "Nami",
+          "imageUrl": "https://example.invalid/545002.jpg",
+          "groupId": 23024,
+          "extendedData": [
+            { "name": "Number", "displayName": "Number", "value": "OP06-020" },
+            { "name": "Rarity", "displayName": "Rarity", "value": "R" }
+          ]
+        },
+        {
+          "productId": 545003,
+          "name": "Wings of the Captain Booster Box",
+          "cleanName": "Wings of the Captain Booster Box",
+          "imageUrl": "https://example.invalid/545003.jpg",
+          "groupId": 23024,
+          "extendedData": []
+        }
+      ]
+    },
+    "23425": {
+      "success": true,
+      "errors": [],
+      "results": [
+        {
+          "productId": 556001,
+          "name": "Monkey.D.Luffy",
+          "cleanName": "Monkey D Luffy",
+          "imageUrl": "https://example.invalid/556001.jpg",
+          "groupId": 23425,
+          "extendedData": [
+            { "name": "Number", "displayName": "Number", "value": "OP07-119" },
+            { "name": "Rarity", "displayName": "Rarity", "value": "L" }
+          ]
+        },
+        {
+          "productId": 556002,
+          "name": "Uta",
+          "cleanName": "Uta",
+          "imageUrl": "https://example.invalid/556002.jpg",
+          "groupId": 23425,
+          "extendedData": [
+            { "name": "Number", "displayName": "Number", "value": "025/120" },
+            { "name": "Rarity", "displayName": "Rarity", "value": "C" }
+          ]
+        }
+      ]
+    }
+  },
+  "prices": {
+    "23024": {
+      "success": true,
+      "errors": [],
+      "results": [
+        { "productId": 545001, "subTypeName": "Normal", "marketPrice": 184.32, "lowPrice": 160.0, "midPrice": 180.0, "directLowPrice": null },
+        { "productId": 545002, "subTypeName": "Foil", "marketPrice": 1.42, "lowPrice": 0.95, "midPrice": 1.3, "directLowPrice": null },
+        { "productId": 545003, "subTypeName": "Normal", "marketPrice": 89.99, "lowPrice": 85.0, "midPrice": 88.0, "directLowPrice": null },
+        { "productId": 545099, "subTypeName": "Normal", "marketPrice": null, "lowPrice": null, "midPrice": null, "directLowPrice": null }
+      ]
+    },
+    "23425": {
+      "success": true,
+      "errors": [],
+      "results": [
+        { "productId": 556001, "subTypeName": "Normal", "marketPrice": 12.5, "lowPrice": 9.99, "midPrice": 11.0, "directLowPrice": null },
+        { "productId": 556002, "subTypeName": "Normal", "marketPrice": 0.11, "lowPrice": 0.05, "midPrice": 0.1, "directLowPrice": null }
+      ]
+    }
+  }
+}

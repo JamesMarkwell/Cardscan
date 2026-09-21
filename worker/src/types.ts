@@ -3,6 +3,8 @@ export interface Env {
   PACKS: R2Bucket;
   FINGERPRINT_QUEUE?: Queue<FingerprintJob>;
   USER_AGENT: string;
+  /** Minimum gap between requests to a source host. Defaults to 1000ms. */
+  SOURCE_MIN_INTERVAL_MS?: string;
   PUBLIC_BASE_URL: string;
   WORKER_ADMIN_TOKEN?: string;
 }
