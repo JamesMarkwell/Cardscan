@@ -2,8 +2,8 @@
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { openDatabase } from './src/data/db';
+import { ErrorBoundary } from './src/ui/ErrorBoundary';
 import { loadIndexPack } from './src/data/indexPack';
 import { Settings, loadSettings } from './src/data/settings';
 import { localVersion } from './src/data/sync';
@@ -61,7 +61,7 @@ export default function App() {
   }, [service, settings.gameId, collectionKey]);
 
   return (
-    <SafeAreaProvider>
+    <ErrorBoundary>
       <View style={styles.container}>
         <StatusBar style="light" />
 
@@ -99,7 +99,7 @@ export default function App() {
           onAdded={() => setCollectionKey((key) => key + 1)}
         />
       </View>
-    </SafeAreaProvider>
+    </ErrorBoundary>
   );
 }
 

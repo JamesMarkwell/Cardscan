@@ -26,6 +26,11 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test -- --ci
+      - name: Bundle the app the way the release build does
+        # Catches anything that breaks the JS bundle -- a bad import, malformed
+        # JSX, a missing asset -- in about 20 seconds, rather than after a
+        # five-minute Gradle build or, worse, on a phone.
+        run: npx expo export --platform android --output-dir "$RUNNER_TEMP/expo-export"
 
   worker:
     name: Worker — typecheck and tests
