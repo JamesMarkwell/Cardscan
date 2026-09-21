@@ -79,7 +79,8 @@ cd worker && npm run typecheck && npm test   # catalog import, 35 tests
 cd ml     && python -m pytest -q             # index pack format, 7 tests
 ```
 
-The worker tests run the real import — migrations, upserts, the price join, the
+The worker tests need **Node 22.5 or newer** (`node:sqlite`). They run the real
+import — migrations, upserts, the price join, the
 published pack and the delta — against an actual SQLite database
 (`worker/test/support/localD1.ts` puts `node:sqlite` behind the D1 interface),
 with recorded TCGCSV responses standing in for the network. That is the code the

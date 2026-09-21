@@ -12,7 +12,21 @@ import { createRequire } from 'node:module';
 // module.builtinModules and Vite tries to resolve it as a package. Loading it
 // through createRequire keeps it out of the static dependency graph.
 const nodeRequire = createRequire(import.meta.url);
-const { DatabaseSync } = nodeRequire('node:sqlite') as typeof import('node:sqlite');
+
+function loadSqlite(): typeof import('node:sqlite') {
+  try {
+    return nodeRequire('node:sqlite') as typeof import('node:sqlite');
+  } catch (error) {
+    // node:sqlite arrived in Node 22.5. Without this the failure reads
+    // "No such built-in module: node:sqlite", which says nothing about why.
+    throw new Error(
+      `These tests need Node 22.5 or newer for node:sqlite (running ${process.version}). ` +
+        `Original error: ${(error as Error).message}`,
+    );
+  }
+}
+
+const { DatabaseSync } = loadSqlite();
 
 type DatabaseSync = InstanceType<typeof DatabaseSync>;
 
