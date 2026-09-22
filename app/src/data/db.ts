@@ -9,18 +9,34 @@ import { CollectionEntry, Condition, GameId, Portfolio, Price, Printing, Variant
 
 const DATABASE_NAME = 'cardscan.db';
 
-let database: SQLite.SQLiteDatabase | null = null;
+// A single shared connection. The open is cached as a *promise*, not the
+// resolved handle, so callers that race (the mount effect, the launch auto-sync
+// and the Settings button all open the DB) await the same open instead of each
+// starting their own. Two opens would leave one SQLiteDatabase unreferenced;
+// expo-sqlite then releases its native handle, and any query still holding that
+// orphaned handle fails with "NativeDatabase.execAsync ... NullPointerException".
+let databasePromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
-export async function openDatabase(): Promise<SQLite.SQLiteDatabase> {
-  if (database) return database;
-  database = await SQLite.openDatabaseAsync(DATABASE_NAME);
-  await migrate(database);
-  return database;
+export function openDatabase(): Promise<SQLite.SQLiteDatabase> {
+  if (!databasePromise) {
+    databasePromise = (async () => {
+      const db = await SQLite.openDatabaseAsync(DATABASE_NAME);
+      await migrate(db);
+      return db;
+    })().catch((error) => {
+      // Don't cache a failed open — let the next call retry from scratch.
+      databasePromise = null;
+      throw error;
+    });
+  }
+  return databasePromise;
 }
 
 export async function closeDatabase(): Promise<void> {
-  await database?.closeAsync();
-  database = null;
+  const pending = databasePromise;
+  databasePromise = null;
+  const db = await pending?.catch(() => null);
+  await db?.closeAsync();
 }
 
 async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
