@@ -37,6 +37,9 @@ jobs:
       # skips bundling for debuggable variants) and expects a Metro dev server,
       # so it opens and closes immediately when installed on its own.
       VARIANT: ${{ inputs.variant || 'release' }}
+      # This repo's own builds pre-wire their backend from a repo variable/secret.
+      # A fork without it gets a blank default and uses the in-app Settings field.
+      CARDSCAN_CATALOG_URL: ${{ vars.CARDSCAN_CATALOG_URL || secrets.CARDSCAN_CATALOG_URL }}
 
     steps:
       - uses: actions/checkout@v4

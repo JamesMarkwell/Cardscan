@@ -173,6 +173,22 @@ Finally, in the app: **Settings → Catalog URL** → paste the worker URL → *
 catalog now**. Until a catalog is synced the scanner has nothing to match
 against and says so.
 
+### Pre-wiring the catalog URL (optional)
+
+The app has **no backend URL baked into its source** — this is open source, so a
+fork should not point at someone else's server. Each install can enter its own
+under **Settings → Catalog URL**.
+
+To pre-wire a build so it syncs on first launch with no Settings visit, set
+`CARDSCAN_CATALOG_URL` to your Worker URL. `app.config.js` reads it into
+`expo.extra.catalogUrl` at build time. For CI, add it as a repository
+**variable** (Settings → Secrets and variables → Actions → Variables) named
+`CARDSCAN_CATALOG_URL`; the Android workflow passes it through. Locally:
+
+```bash
+CARDSCAN_CATALOG_URL="https://cardscan-worker.<subdomain>.workers.dev" npx expo run:android
+```
+
 ## Licence
 
 AGPL-3.0 — see [`LICENSE`](LICENSE). Card recognition uses

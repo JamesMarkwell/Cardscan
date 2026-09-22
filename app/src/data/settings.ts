@@ -1,14 +1,18 @@
 /** Small JSON-file settings store — no extra native dependency needed. */
+import Constants from 'expo-constants';
 import { File, Paths } from 'expo-file-system';
 import { GameId } from './types';
 
 /**
- * Baked-in catalog URL, so the app syncs on first launch without anyone opening
- * Settings. Set this to the deployed Worker's URL, e.g.
- * "https://cardscan-worker.<your-subdomain>.workers.dev". Left blank until the
- * Worker is deployed; the Settings field still overrides it.
+ * Baked-in catalog URL, so the app can sync on first launch without anyone
+ * opening Settings. It comes from Expo config `extra.catalogUrl`, which
+ * app.config.js fills from the CARDSCAN_CATALOG_URL environment variable at
+ * build time — so no backend URL lives in committed source. A build that does
+ * not set it (a fork, a local build) gets a blank default and the Settings
+ * field is used instead.
  */
-export const DEFAULT_CATALOG_URL = '';
+export const DEFAULT_CATALOG_URL: string =
+  (Constants.expoConfig?.extra?.catalogUrl as string | undefined)?.trim() ?? '';
 
 export interface Settings {
   /** Base URL of the CardScan Worker that serves the manifest and packs. */
