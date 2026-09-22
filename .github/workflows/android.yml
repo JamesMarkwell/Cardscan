@@ -105,6 +105,36 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           find android/app/build/outputs/apk -name '*.apk' -exec ls -lh {} +
 
+      - name: Check the APK carries the React Native runtime libraries
+        # onnxruntime-react-native's packagingOptions used to exclude these, and
+        # a library's packaging rules merge into the app -- which stripped them
+        # from the whole APK and killed the app at startup with
+        # UnsatisfiedLinkError, before any JS ran. Fail the build rather than
+        # ship that again.
+        run: |
+          set -euo pipefail
+          apk="$(find android/app/build/outputs/apk -name '*.apk' | head -1)"
+          libs="$(unzip -l "$apk" | grep -oE 'lib/[^/]+/[^ ]+\.so' | sed 's|.*/||' | sort -u)"
+
+          {
+            echo "### Native libraries in the APK"
+            echo
+            echo '```'
+            echo "$libs"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          missing=""
+          for lib in libjsi.so libreact_nativemodule_core.so libturbomodulejsijni.so; do
+            grep -qx "$lib" <<<"$libs" || missing="$missing $lib"
+          done
+          if [ -n "$missing" ]; then
+            echo "APK is missing React Native runtime libraries:$missing"
+            echo "The app will die at startup with UnsatisfiedLinkError."
+            exit 1
+          fi
+          echo "All required runtime libraries are present."
+
       - uses: actions/upload-artifact@v4
         with:
           name: cardscan-${{ inputs.variant || 'release' }}-apk

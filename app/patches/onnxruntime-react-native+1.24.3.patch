@@ -1,8 +1,32 @@
 diff --git a/node_modules/onnxruntime-react-native/android/build.gradle b/node_modules/onnxruntime-react-native/android/build.gradle
-index 41b4359..3bc988a 100644
+index 41b4359..5d68bdf 100644
 --- a/node_modules/onnxruntime-react-native/android/build.gradle
 +++ b/node_modules/onnxruntime-react-native/android/build.gradle
-@@ -247,7 +247,8 @@ dependencies {
+@@ -123,13 +123,18 @@ android {
+     pickFirst '**/libc++_shared.so'
+     pickFirst '**/libfbjni.so'
+     doNotStrip resolveBuildType() == 'debug' ? "**/**/*.so" : ''
++    // These four were excluded to resolve duplicates against the old
++    // architecture's packaging. A library's packagingOptions are merged into the
++    // consuming app, so on React Native 0.86 -- bridgeless, New Architecture
++    // only -- excluding them strips libraries the runtime needs and the app dies
++    // with UnsatisfiedLinkError before any JS runs. pickFirst resolves the same
++    // duplicates while keeping one copy in the APK.
++    pickFirst '**/libjsi.so'
++    pickFirst '**/libreact_nativemodule_core.so'
++    pickFirst '**/libturbomodulejsijni.so'
+     excludes = [
+       "META-INF",
+-      "META-INF/**",
+-      "**/libjsi.so",
+-      "**/libfbjni.so",
+-      "**/libreact_nativemodule_core.so",
+-      "**/libturbomodulejsijni.so"
++      "META-INF/**"
+     ]
+   }
+ 
+@@ -247,7 +252,8 @@ dependencies {
      extractLibs "com.microsoft.onnxruntime:onnxruntime-android:latest.integration@aar"
    }
  
