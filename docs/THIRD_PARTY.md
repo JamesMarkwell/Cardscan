@@ -11,6 +11,19 @@ Card recognition is CollectorVision's, used unchanged.
 | Dewarp / ordering / preprocessing logic | ported into `app/src/scan/geometry.ts` and `app/src/scan/image.ts` | same commit |
 | Python embedder used by the nightly job | `ml/requirements.txt` | same commit |
 
+### On-device inference engine
+
+CollectorVision's models are ONNX, so the app runs them with **ONNX Runtime**.
+The binding is a local Expo module, `app/modules/expo-onnx`, wrapping the
+official `com.microsoft.onnxruntime:onnxruntime-android` AAR (pinned to 1.20.0).
+
+It replaces `onnxruntime-react-native`, which is built on React Native's legacy
+bridge and crashes at startup on RN 0.86 — Expo SDK 57 mandates the New
+Architecture (bridgeless), which that library does not support. The Expo Modules
+API is bridgeless-native, and the ONNX models are unchanged, so recognition is
+unaffected. iOS is not implemented in the module yet (Android is the current
+target).
+
 The version is pinned deliberately: an upstream model change would silently
 change what the app recognises, so upgrading is a decision, not a side effect.
 

@@ -1,43 +1,68 @@
 /**
- * Lazy loader for onnxruntime-react-native.
+ * ONNX Runtime access for the scan pipeline.
  *
- * The library runs `Module.install()` at import time (its binding.js), and that
- * is a blocking synchronous call into a legacy native module. React Native 0.86
- * is bridgeless, where that call is rejected, and because ONNX Runtime sits at
- * the top of the app's module graph the failure happens during initial bundle
- * evaluation -- before React mounts, so nothing can catch it and the app closes
- * instantly with no error screen.
+ * Backed by the local `expo-onnx` native module (Expo Modules API, New
+ * Architecture / bridgeless native), which wraps the official onnxruntime-android
+ * AAR. This replaces onnxruntime-react-native, whose legacy-bridge native code
+ * crashed the app at startup on React Native 0.86 — Expo SDK 57 mandates the New
+ * Architecture, which that library does not support.
  *
- * Loading it lazily moves that evaluation to the moment scanning actually
- * starts, after the UI is up, and inside a try/catch. A failure then surfaces as
- * an error on the scan screen instead of taking the whole app down. The models
- * only load when the user opens the scanner, so nothing is lost by deferring.
+ * The surface here (InferenceSession, Tensor) matches how models.ts and
+ * pipeline.ts already use it, so nothing above this file had to change.
  */
+import { requireNativeModule } from 'expo-modules-core';
+import type { NativeOnnx } from '../../modules/expo-onnx/src';
 
-// Types only: `import type` is erased at compile time and adds no runtime
-// require, so this does not pull ONNX Runtime into the startup path.
-import type { InferenceSession as OrtInferenceSession, Tensor as OrtTensor } from 'onnxruntime-react-native';
+// Resolved lazily so importing this file off-device (tests, tooling) does not
+// require the native module to be present.
+let native: NativeOnnx | null = null;
+function nativeModule(): NativeOnnx {
+  if (!native) native = requireNativeModule('ExpoOnnx') as NativeOnnx;
+  return native;
+}
 
-export type InferenceSession = OrtInferenceSession;
-export type Tensor = OrtTensor;
+/** Feeds and outputs are single-input/keyed by name, matching the models here. */
+export class Tensor {
+  constructor(
+    public readonly type: 'float32',
+    public readonly data: Float32Array,
+    public readonly dims: number[],
+  ) {}
+}
 
-type OrtModule = typeof import('onnxruntime-react-native');
+export interface RunResult {
+  [name: string]: { data: Float32Array; dims: number[] };
+}
 
-let loaded: OrtModule | null = null;
-let failure: Error | null = null;
+export class InferenceSession {
+  private constructor(
+    private readonly id: string,
+    readonly inputNames: string[],
+    readonly outputNames: string[],
+  ) {}
 
-/**
- * Load ONNX Runtime, evaluating its module body (and its install() call) now
- * rather than at app start. Caches success and failure so it is attempted once.
- */
-export async function loadOrt(): Promise<OrtModule> {
-  if (loaded) return loaded;
-  if (failure) throw failure;
-  try {
-    loaded = await import('onnxruntime-react-native');
-    return loaded;
-  } catch (error) {
-    failure = error instanceof Error ? error : new Error(String(error));
-    throw failure;
+  /** Load a model file and cache its input/output names for synchronous access. */
+  static async create(path: string): Promise<InferenceSession> {
+    const onnx = nativeModule();
+    const id = await onnx.create(path);
+    const [inputNames, outputNames] = await Promise.all([onnx.inputNames(id), onnx.outputNames(id)]);
+    return new InferenceSession(id, inputNames, outputNames);
+  }
+
+  async run(feeds: Record<string, Tensor>): Promise<RunResult> {
+    const entries = Object.entries(feeds);
+    if (entries.length === 0) throw new Error('run() needs one input tensor');
+    const [name, tensor] = entries[0];
+
+    const raw = await nativeModule().run(this.id, name, tensor.data, tensor.dims, this.outputNames);
+    const result: RunResult = {};
+    for (const key of Object.keys(raw)) {
+      result[key] = { data: Float32Array.from(raw[key].data), dims: raw[key].dims };
+    }
+    return result;
+  }
+
+  async release(): Promise<void> {
+    await nativeModule().release(this.id);
   }
 }

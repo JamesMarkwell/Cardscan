@@ -7,7 +7,7 @@
  */
 import { Asset } from 'expo-asset';
 import { Directory, File, Paths } from 'expo-file-system';
-import { InferenceSession, loadOrt } from './ort';
+import { InferenceSession } from './ort';
 
 export interface ModelSpec {
   name: string;
@@ -57,11 +57,7 @@ export async function ensureModelFile(spec: ModelSpec): Promise<string> {
 
 export async function createSession(spec: ModelSpec): Promise<InferenceSession> {
   const path = await ensureModelFile(spec);
-  const ort = await loadOrt();
-  return ort.InferenceSession.create(path, {
-    // NNAPI where the device supports it, XNNPACK/CPU otherwise. ONNX Runtime
-    // falls back on its own when a provider is unavailable.
-    executionProviders: ['nnapi', 'xnnpack', 'cpu'],
-    graphOptimizationLevel: 'all',
-  });
+  // Execution provider selection lives in the native module (CPU today; NNAPI
+  // can be added there without touching this layer).
+  return InferenceSession.create(path);
 }

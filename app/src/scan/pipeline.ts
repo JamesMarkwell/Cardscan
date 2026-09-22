@@ -4,7 +4,7 @@
  * Everything runs on the phone. The only I/O is loading the two ONNX models and
  * the fingerprint index once at start-up.
  */
-import { InferenceSession, loadOrt, Tensor } from './ort';
+import { InferenceSession, Tensor } from './ort';
 import { clamp01, isUsableQuad, orderCorners, Point, sigmoid } from './geometry';
 import {
   DETECTOR_SIZE,
@@ -58,9 +58,6 @@ export interface FrameResult {
 export class ScanPipeline {
   private detector: InferenceSession | null = null;
   private embedder: InferenceSession | null = null;
-  // Captured when the models load, so detect()/embed() build tensors without a
-  // top-level ONNX Runtime import (see ./ort).
-  private tensorFactory: (new (type: string, data: Float32Array, dims: number[]) => Tensor) | null = null;
   private index: IndexPack | null = null;
   private readonly options: Required<ScanOptions>;
 
@@ -80,10 +77,6 @@ export class ScanPipeline {
   }
 
   async load(): Promise<void> {
-    if (!this.tensorFactory) {
-      const ort = await loadOrt();
-      this.tensorFactory = ort.Tensor as unknown as typeof this.tensorFactory;
-    }
     if (!this.detector) this.detector = await createSession(CORNELIUS);
     if (!this.embedder) this.embedder = await createSession(MILO);
   }
@@ -97,7 +90,6 @@ export class ScanPipeline {
     await this.embedder?.release();
     this.detector = null;
     this.embedder = null;
-    this.tensorFactory = null;
   }
 
   /** Find the four corners of the card in a frame. */
@@ -109,10 +101,9 @@ export class ScanPipeline {
     const squashed = squashResize(frame, DETECTOR_SIZE);
     toImageNetTensor(squashed, DETECTOR_SIZE, this.detectorTensor);
 
-    if (!this.tensorFactory) throw new Error('Pipeline not loaded');
     const inputName = this.detector.inputNames[0];
     const outputs = await this.detector.run({
-      [inputName]: new this.tensorFactory('float32', this.detectorTensor, [1, 3, DETECTOR_SIZE, DETECTOR_SIZE]),
+      [inputName]: new Tensor('float32', this.detectorTensor, [1, 3, DETECTOR_SIZE, DETECTOR_SIZE]),
     });
 
     const names = this.detector.outputNames;
@@ -138,11 +129,10 @@ export class ScanPipeline {
   async embed(crop: RgbaImage): Promise<Float32Array> {
     if (!this.embedder) throw new Error('Pipeline not loaded');
 
-    if (!this.tensorFactory) throw new Error('Pipeline not loaded');
     toImageNetTensor(crop, EMBEDDER_SIZE, this.embedderTensor);
     const inputName = this.embedder.inputNames[0];
     const outputs = await this.embedder.run({
-      [inputName]: new this.tensorFactory('float32', this.embedderTensor, [1, 3, EMBEDDER_SIZE, EMBEDDER_SIZE]),
+      [inputName]: new Tensor('float32', this.embedderTensor, [1, 3, EMBEDDER_SIZE, EMBEDDER_SIZE]),
     });
 
     return Float32Array.from(outputs[this.embedder.outputNames[0]].data as Float32Array);

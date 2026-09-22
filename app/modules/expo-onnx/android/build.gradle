@@ -1,0 +1,26 @@
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'expo.modules.onnx'
+version = '0.1.0'
+
+// Local module: never published to Maven. Skips the plugin's publishing setup,
+// which otherwise looks for a 'release' SoftwareComponent that is not ready at
+// configuration time.
+expoModule {
+  canBePublished false
+}
+
+android {
+  namespace 'expo.modules.onnx'
+  defaultConfig {
+    minSdkVersion 24
+  }
+}
+
+dependencies {
+  // Official ONNX Runtime for Android. Pinned so recognition results cannot
+  // change under us (mirrors the plan's rule about pinning the model stack).
+  implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.20.0'
+}
