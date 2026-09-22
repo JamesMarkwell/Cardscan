@@ -1,0 +1,7 @@
+{
+  "name": "expo-onnx",
+  "version": "0.1.0",
+  "description": "Local Expo module: on-device ONNX Runtime inference, New Architecture compatible.",
+  "main": "src/index.ts",
+  "private": true
+}

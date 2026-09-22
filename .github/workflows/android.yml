@@ -1,0 +1,147 @@
+name: Android
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Build variant (debug needs a Metro dev server; release is self-contained)"
+        default: release
+        type: choice
+        options: [release, debug]
+      architectures:
+        description: Architectures to build (comma separated)
+        default: arm64-v8a
+        type: string
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: app
+
+    env:
+      # Phones shipped in the last decade are arm64. Pushes build just that one;
+      # use "Run workflow" with all four when a wider set is needed.
+      ARCHITECTURES: ${{ inputs.architectures || 'arm64-v8a' }}
+      # Release, not debug: a debug APK contains no JS bundle (React Native
+      # skips bundling for debuggable variants) and expects a Metro dev server,
+      # so it opens and closes immediately when installed on its own.
+      VARIANT: ${{ inputs.variant || 'release' }}
+      # This repo's own builds pre-wire their backend from a repo variable/secret.
+      # A fork without it gets a blank default and uses the in-app Settings field.
+      CARDSCAN_CATALOG_URL: ${{ vars.CARDSCAN_CATALOG_URL || secrets.CARDSCAN_CATALOG_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Check the runner's Android SDK
+        # The ubuntu-latest image ships the SDK already. android-actions/setup-android
+        # is not used: it installs the long-removed "tools" package and fails.
+        run: |
+          set -euo pipefail
+          test -n "${ANDROID_HOME:-}" || { echo "ANDROID_HOME is not set"; exit 1; }
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate the native project
+        # Continuous native generation: android/ is not committed, it is
+        # regenerated from app.json so the config stays the single source.
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('app/android/**/*.gradle*', 'app/package-lock.json') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Assemble
+        working-directory: app/android
+        run: |
+          set -euo pipefail
+          task="assemble$(python3 -c "print('${VARIANT}'.capitalize())")"
+          ./gradlew "$task" \
+            -PreactNativeArchitectures="${ARCHITECTURES}" \
+            --no-daemon --stacktrace
+
+      - name: Report APK sizes
+        run: |
+          set -euo pipefail
+          {
+            echo "### ${VARIANT} APKs (${ARCHITECTURES})"
+            echo
+            if [ "$VARIANT" = "debug" ]; then
+              echo "> A debug APK carries no JS bundle. It needs \`npx expo start\`"
+              echo "> running and reachable, or it will close as soon as it opens."
+              echo
+            fi
+            echo "| APK | Size |"
+            echo "| --- | ---- |"
+            find android/app/build/outputs/apk -name '*.apk' -printf '| %f | %s |\n' \
+              | awk -F'|' '{printf "|%s|%.1f MB |\n", $2, $3/1048576}'
+          } >> "$GITHUB_STEP_SUMMARY"
+          find android/app/build/outputs/apk -name '*.apk' -exec ls -lh {} +
+
+      - name: List the APK's native libraries
+        # onnxruntime-react-native's packagingOptions exclude .so files, and a
+        # library's packaging rules merge into the app, so they apply to the
+        # whole APK. Print what actually shipped -- guessing at these names from
+        # the outside is how this went wrong once already -- and fail only on
+        # the two that are unambiguously fatal: React Native's own runtime and
+        # ONNX Runtime's.
+        run: |
+          set -euo pipefail
+          apk="$(find android/app/build/outputs/apk -name '*.apk' | head -1)"
+          libs="$(unzip -l "$apk" | grep -oE 'lib/[^/]+/[^ ]+\.so' | sed 's|.*/||' | sort -u)"
+
+          echo "Native libraries in $(basename "$apk"):"
+          echo "$libs" | sed 's/^/  /'
+          {
+            echo "### Native libraries in the APK"
+            echo
+            echo '```'
+            echo "$libs"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          missing=""
+          grep -qx 'libreactnative.so' <<<"$libs" || missing="$missing libreactnative.so"
+          grep -q 'onnxruntime' <<<"$libs" || missing="$missing libonnxruntime*.so"
+          if [ -n "$missing" ]; then
+            echo "APK is missing:$missing — the app cannot start without these."
+            exit 1
+          fi
+          echo "React Native and ONNX Runtime native libraries are both present."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cardscan-${{ inputs.variant || 'release' }}-apk
+          path: app/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 30
