@@ -6,7 +6,7 @@ import { openDatabase } from './src/data/db';
 import { ErrorBoundary } from './src/ui/ErrorBoundary';
 import { loadIndexPack } from './src/data/indexPack';
 import { Settings, loadSettings } from './src/data/settings';
-import { localVersion } from './src/data/sync';
+import { fetchManifest, localVersion, syncGame } from './src/data/sync';
 import { ScanResult, ScanService } from './src/scan/scanService';
 import { CollectionScreen } from './src/ui/CollectionScreen';
 import { ResultSheet } from './src/ui/ResultSheet';
@@ -28,12 +28,42 @@ export default function App() {
   const [result, setResult] = useState<ScanResult | null>(null);
   const [collectionKey, setCollectionKey] = useState(0);
   const [indexReady, setIndexReady] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   const service = useMemo(() => new ScanService({ gameId: settings.gameId, framesPerScan: 3 }), []);
 
   useEffect(() => {
     void openDatabase();
   }, []);
+
+  // Auto-sync from the baked-in (or saved) catalog URL, so the catalogue loads
+  // without anyone opening Settings. syncGame no-ops when already up to date, so
+  // this is cheap on later launches; a failure (offline, not deployed yet) just
+  // leaves whatever is already on device.
+  useEffect(() => {
+    const base = settings.apiBaseUrl?.trim();
+    if (!base) return undefined;
+
+    let cancelled = false;
+    (async () => {
+      setSyncing(true);
+      try {
+        const manifest = await fetchManifest(base);
+        const game = manifest.games.find((entry) => entry.game === settings.gameId);
+        if (!game) return;
+        const changed = await syncGame(base, game);
+        if (changed && !cancelled) setCollectionKey((key) => key + 1);
+      } catch {
+        // Offline, or the Worker is not deployed yet — keep any existing data.
+      } finally {
+        if (!cancelled) setSyncing(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.apiBaseUrl, settings.gameId]);
 
   // Load the fingerprint index for whichever game is selected.
   useEffect(() => {
@@ -71,6 +101,7 @@ export default function App() {
               service={service}
               gameId={settings.gameId}
               indexReady={indexReady}
+              syncing={syncing}
               onGameChange={(gameId) => setSettings((current) => ({ ...current, gameId }))}
               onResult={setResult}
             />

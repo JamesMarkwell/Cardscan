@@ -28,9 +28,10 @@ interface Props {
   onGameChange: (gameId: GameId) => void;
   onResult: (result: ScanResult) => void;
   indexReady: boolean;
+  syncing?: boolean;
 }
 
-export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady }: Props) {
+export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady, syncing }: Props) {
   const [permission, requestPermission] = useCameraPermissions();
   const [status, setStatus] = useState('Starting camera');
   const [modelsReady, setModelsReady] = useState(false);
@@ -152,8 +153,10 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       <View style={styles.statusBar}>
         {!modelsReady ? <ActivityIndicator color={theme.accent} /> : null}
         <Text style={styles.statusText}>{status}</Text>
-        {!indexReady ? (
-          <Text style={styles.warning}>No card index yet — sync a catalog in Settings.</Text>
+        {syncing ? (
+          <Text style={styles.warning}>Updating catalogue…</Text>
+        ) : !indexReady ? (
+          <Text style={styles.warning}>No card index yet — it downloads on first sync.</Text>
         ) : null}
       </View>
     </View>
