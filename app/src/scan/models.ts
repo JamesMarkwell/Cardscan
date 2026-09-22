@@ -7,7 +7,7 @@
  */
 import { Asset } from 'expo-asset';
 import { Directory, File, Paths } from 'expo-file-system';
-import { InferenceSession } from 'onnxruntime-react-native';
+import { InferenceSession, loadOrt } from './ort';
 
 export interface ModelSpec {
   name: string;
@@ -57,7 +57,8 @@ export async function ensureModelFile(spec: ModelSpec): Promise<string> {
 
 export async function createSession(spec: ModelSpec): Promise<InferenceSession> {
   const path = await ensureModelFile(spec);
-  return InferenceSession.create(path, {
+  const ort = await loadOrt();
+  return ort.InferenceSession.create(path, {
     // NNAPI where the device supports it, XNNPACK/CPU otherwise. ONNX Runtime
     // falls back on its own when a provider is unavailable.
     executionProviders: ['nnapi', 'xnnpack', 'cpu'],
