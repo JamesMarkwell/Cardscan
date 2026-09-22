@@ -127,14 +127,17 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          missing=""
-          grep -qx 'libreactnative.so' <<<"$libs" || missing="$missing libreactnative.so"
-          grep -q 'onnxruntime' <<<"$libs" || missing="$missing libonnxruntime*.so"
-          if [ -n "$missing" ]; then
-            echo "APK is missing:$missing — the app cannot start without these."
+          # DIAGNOSTIC branch: ONNX Runtime is removed on purpose, so only
+          # React Native's own runtime library is required here.
+          if ! grep -qx 'libreactnative.so' <<<"$libs"; then
+            echo "APK is missing libreactnative.so, the app cannot start."
             exit 1
           fi
-          echo "React Native and ONNX Runtime native libraries are both present."
+          if grep -q 'onnxruntime' <<<"$libs"; then
+            echo "Expected ONNX Runtime absent in this diagnostic build, but it is present."
+            exit 1
+          fi
+          echo "libreactnative.so present; ONNX Runtime absent as intended."
 
       - uses: actions/upload-artifact@v4
         with:
