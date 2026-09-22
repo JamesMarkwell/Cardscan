@@ -5,6 +5,11 @@
     "types": [
       "jest",
       "node"
-    ]
+    ],
+    "paths": {
+      "onnxruntime-react-native": [
+        "./stubs/onnxruntime-react-native.ts"
+      ]
+    }
   }
 }

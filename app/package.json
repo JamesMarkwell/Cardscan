@@ -9,8 +9,7 @@
     "ios": "expo run:ios",
     "prebuild": "expo prebuild --platform android --clean",
     "typecheck": "tsc --noEmit",
-    "test": "jest",
-    "postinstall": "patch-package"
+    "test": "jest"
   },
   "dependencies": {
     "expo": "~57.0.24",
@@ -23,7 +22,6 @@
     "expo-status-bar": "~57.0.1",
     "expo-system-ui": "~57.0.4",
     "jpeg-js": "^0.4.4",
-    "onnxruntime-react-native": "^1.24.3",
     "react": "19.2.3",
     "react-native": "0.86.3"
   },

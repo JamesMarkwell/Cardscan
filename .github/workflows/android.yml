@@ -138,7 +138,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cardscan-${{ inputs.variant || 'release' }}-apk
+          name: cardscan-NO-ORT-diagnostic-apk
           path: app/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
           retention-days: 30
