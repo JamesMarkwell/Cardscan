@@ -105,17 +105,20 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           find android/app/build/outputs/apk -name '*.apk' -exec ls -lh {} +
 
-      - name: Check the APK carries the React Native runtime libraries
-        # onnxruntime-react-native's packagingOptions used to exclude these, and
-        # a library's packaging rules merge into the app -- which stripped them
-        # from the whole APK and killed the app at startup with
-        # UnsatisfiedLinkError, before any JS ran. Fail the build rather than
-        # ship that again.
+      - name: List the APK's native libraries
+        # onnxruntime-react-native's packagingOptions exclude .so files, and a
+        # library's packaging rules merge into the app, so they apply to the
+        # whole APK. Print what actually shipped -- guessing at these names from
+        # the outside is how this went wrong once already -- and fail only on
+        # the two that are unambiguously fatal: React Native's own runtime and
+        # ONNX Runtime's.
         run: |
           set -euo pipefail
           apk="$(find android/app/build/outputs/apk -name '*.apk' | head -1)"
           libs="$(unzip -l "$apk" | grep -oE 'lib/[^/]+/[^ ]+\.so' | sed 's|.*/||' | sort -u)"
 
+          echo "Native libraries in $(basename "$apk"):"
+          echo "$libs" | sed 's/^/  /'
           {
             echo "### Native libraries in the APK"
             echo
@@ -125,15 +128,13 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           missing=""
-          for lib in libjsi.so libreact_nativemodule_core.so libturbomodulejsijni.so; do
-            grep -qx "$lib" <<<"$libs" || missing="$missing $lib"
-          done
+          grep -qx 'libreactnative.so' <<<"$libs" || missing="$missing libreactnative.so"
+          grep -q 'onnxruntime' <<<"$libs" || missing="$missing libonnxruntime*.so"
           if [ -n "$missing" ]; then
-            echo "APK is missing React Native runtime libraries:$missing"
-            echo "The app will die at startup with UnsatisfiedLinkError."
+            echo "APK is missing:$missing — the app cannot start without these."
             exit 1
           fi
-          echo "All required runtime libraries are present."
+          echo "React Native and ONNX Runtime native libraries are both present."
 
       - uses: actions/upload-artifact@v4
         with:
