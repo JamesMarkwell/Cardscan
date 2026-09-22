@@ -8,8 +8,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildDelta, buildFullDelta, importGame, nextVersion } from '../src/catalog';
-import { runRefresh } from '../src/index';
+import { buildDelta, buildFullDelta, importGame, importGameBatch, nextVersion } from '../src/catalog';
+import { runRefresh, runRefreshStep } from '../src/index';
 import { Env } from '../src/types';
 import { LocalD1, LocalR2 } from './support/localD1';
 
@@ -22,6 +22,7 @@ const FIXTURES = JSON.parse(
 };
 
 const MIGRATION = join(__dirname, '..', 'migrations', '0001_init.sql');
+const MIGRATION_PROGRESS = join(__dirname, '..', 'migrations', '0002_import_progress.sql');
 const OPTIONS = { userAgent: 'CardScan-test/0.1', minIntervalMs: 0 };
 
 /** Serve the fixtures at the URLs the source adapter asks for. */
@@ -290,5 +291,126 @@ describe('runRefresh', () => {
     expect(runs[0].detail).toContain('503');
     // Nothing half-imported should be published.
     expect(packs.objects.size).toBe(0);
+  });
+});
+
+describe('importGameBatch', () => {
+  let db: LocalD1;
+  let env: Env;
+
+  beforeEach(() => {
+    db = new LocalD1();
+    db.applyMigration(MIGRATION);
+    env = {
+      DB: db as unknown as D1Database,
+      PACKS: new LocalR2() as unknown as R2Bucket,
+      USER_AGENT: 'CardScan-test/0.1',
+      SOURCE_MIN_INTERVAL_MS: '0',
+      PUBLIC_BASE_URL: 'https://cardscan.example',
+    };
+    stubFetch();
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('imports one slice of sets and reports the cursor to resume from', async () => {
+    const first = await importGameBatch(env, 'onepiece', OPTIONS, 0, 1);
+    expect(first.total).toBe(2);
+    expect(first.nextCursor).toBe(1);
+    expect(first.report.sets).toBe(1);
+    expect(db.count('sets')).toBe(1);
+
+    const second = await importGameBatch(env, 'onepiece', OPTIONS, first.nextCursor, 1);
+    expect(second.nextCursor).toBe(2);
+    expect(second.report.sets).toBe(1);
+    expect(db.count('sets')).toBe(2);
+    expect(db.count('printings')).toBe(4);
+  });
+
+  it('imports the same sets a full import would, in batches', async () => {
+    let cursor = 0;
+    let total = Infinity;
+    while (cursor < total) {
+      const step = await importGameBatch(env, 'onepiece', OPTIONS, cursor, 1);
+      cursor = step.nextCursor;
+      total = step.total;
+    }
+    expect(db.count('sets')).toBe(2);
+    expect(db.count('printings')).toBe(4);
+    expect(db.count('prices_latest')).toBe(4);
+  });
+});
+
+describe('runRefreshStep', () => {
+  let db: LocalD1;
+  let packs: LocalR2;
+  let env: Env;
+
+  beforeEach(() => {
+    db = new LocalD1();
+    db.applyMigration(MIGRATION);
+    db.applyMigration(MIGRATION_PROGRESS);
+    packs = new LocalR2();
+    env = {
+      DB: db as unknown as D1Database,
+      PACKS: packs as unknown as R2Bucket,
+      USER_AGENT: 'CardScan-test/0.1',
+      SOURCE_MIN_INTERVAL_MS: '0',
+      PUBLIC_BASE_URL: 'https://cardscan.example',
+    };
+    stubFetch();
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('publishes nothing until the final batch, then publishes once', async () => {
+    // One set per batch, so the two-set fixture takes two calls.
+    const first = await runRefreshStep(env, { game: 'onepiece', batchSize: 1 });
+    expect(first.done).toBe(false);
+    expect(first).toMatchObject({ cursor: 1, total: 2 });
+    expect(packs.objects.size).toBe(0);
+    expect(db.query<{ status: string }>('SELECT status FROM refresh_runs')[0].status).toBe('running');
+
+    const second = await runRefreshStep(env, { game: 'onepiece', batchSize: 1 });
+    expect(second.done).toBe(true);
+    expect(second.report).toMatchObject({ game: 'onepiece', printings: 4 });
+
+    const version = nextVersion();
+    expect([...packs.objects.keys()]).toContain(`games/onepiece/catalog-${version}.json`);
+
+    const runs = db.query<{ status: string; finished_at: string | null }>('SELECT status, finished_at FROM refresh_runs');
+    expect(runs).toHaveLength(1);
+    expect(runs[0].status).toBe('ok');
+    expect(runs[0].finished_at).not.toBeNull();
+
+    const versions = db.query<{ printings_count: number }>('SELECT printings_count FROM catalog_versions');
+    expect(versions).toHaveLength(1);
+    expect(versions[0].printings_count).toBe(4);
+  });
+
+  it('records progress so a resumed run picks up the accumulated totals', async () => {
+    await runRefreshStep(env, { game: 'onepiece', batchSize: 1 });
+    const mid = db.query<{ cursor: number; printings: number; done_at: string | null }>(
+      'SELECT cursor, printings, done_at FROM import_progress WHERE game_id = ?',
+      'onepiece',
+    )[0];
+    expect(mid.cursor).toBe(1);
+    expect(mid.printings).toBeGreaterThan(0);
+    expect(mid.done_at).toBeNull();
+
+    await runRefreshStep(env, { game: 'onepiece', batchSize: 1 });
+    const end = db.query<{ cursor: number; printings: number; done_at: string | null }>(
+      'SELECT cursor, printings, done_at FROM import_progress WHERE game_id = ?',
+      'onepiece',
+    )[0];
+    expect(end.cursor).toBe(2);
+    expect(end.printings).toBe(4);
+    expect(end.done_at).not.toBeNull();
+  });
+
+  it('completes a small game in a single batch when the budget allows', async () => {
+    const only = await runRefreshStep(env, { game: 'onepiece', batchSize: 50 });
+    expect(only.done).toBe(true);
+    expect(only.report).toMatchObject({ game: 'onepiece', sets: 2, printings: 4 });
   });
 });

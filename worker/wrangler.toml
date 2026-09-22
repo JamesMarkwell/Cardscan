@@ -3,9 +3,13 @@ main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Daily, one hour before the fingerprint job in .github/workflows/fingerprint.yml.
+# The refresh imports a few sets per invocation to stay under Cloudflare's
+# per-invocation subrequest limit, so the cron ticks often and works through a
+# game over successive ticks. A tick with nothing due is a cheap no-op (a couple
+# of D1 reads, no upstream requests). Built games are refreshed about once a day
+# (see REFRESH_STALE_MS in src/index.ts).
 [triggers]
-crons = ["0 21 * * *"]
+crons = ["*/10 * * * *"]
 
 [[d1_databases]]
 binding = "DB"

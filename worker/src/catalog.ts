@@ -1,7 +1,7 @@
 /**
  * Importing a game's catalog into D1 and publishing packs to R2.
  */
-import { extended, fetchGroups, fetchPrices, fetchProducts, FetchOptions, TCGCSV_CATEGORY } from './sources';
+import { extended, fetchGroups, fetchPrices, fetchProducts, FetchOptions, TcgGroup, TCGCSV_CATEGORY } from './sources';
 import { matchKey, normaliseName, parseMoney, printingId, setId, splitNumber, variantFromProductName } from './normalise';
 import { CatalogDelta, Env, GameId, PriceRow, PrintingRow } from './types';
 
@@ -18,10 +18,57 @@ export function nextVersion(now = new Date()): string {
   return now.toISOString().slice(0, 10).replace(/-/g, '');
 }
 
+function emptyReport(game: GameId): ImportReport {
+  return { game, sets: 0, printings: 0, prices: 0, unmatched: 0 };
+}
+
+/**
+ * Sets in a stable order so a batched import can resume by index. TCGCSV does
+ * not promise an order, and group ids are stable, so we sort by them: a set
+ * that appears later keeps the same position for earlier ones.
+ */
+function orderedGroups(groups: TcgGroup[]): TcgGroup[] {
+  return [...groups].sort((a, b) => a.groupId - b.groupId);
+}
+
+/** Import all of a game's sets in one pass. Used by tests and full local runs. */
 export async function importGame(env: Env, game: GameId, options: FetchOptions): Promise<ImportReport> {
   const categoryId = TCGCSV_CATEGORY[game];
-  const groups = await fetchGroups(categoryId, options);
-  const report: ImportReport = { game, sets: 0, printings: 0, prices: 0, unmatched: 0 };
+  const groups = orderedGroups(await fetchGroups(categoryId, options));
+  const report = emptyReport(game);
+  await importGroups(env, game, groups, options, report);
+  return report;
+}
+
+/**
+ * Import one slice of a game's sets, starting at `cursor`. Returns how many
+ * sets there are in total and the cursor to resume from, so a caller can drive
+ * the import a batch per Worker invocation and stay under the subrequest limit.
+ */
+export async function importGameBatch(
+  env: Env,
+  game: GameId,
+  options: FetchOptions,
+  cursor: number,
+  batchSize: number,
+): Promise<{ report: ImportReport; total: number; nextCursor: number }> {
+  const categoryId = TCGCSV_CATEGORY[game];
+  const groups = orderedGroups(await fetchGroups(categoryId, options));
+  const slice = groups.slice(cursor, cursor + batchSize);
+  const report = emptyReport(game);
+  await importGroups(env, game, slice, options, report);
+  return { report, total: groups.length, nextCursor: cursor + slice.length };
+}
+
+/** The per-set work, shared by the full and batched imports. */
+async function importGroups(
+  env: Env,
+  game: GameId,
+  groups: TcgGroup[],
+  options: FetchOptions,
+  report: ImportReport,
+): Promise<void> {
+  const categoryId = TCGCSV_CATEGORY[game];
   const now = new Date().toISOString();
 
   for (const group of groups) {
@@ -104,8 +151,6 @@ export async function importGame(env: Env, game: GameId, options: FetchOptions):
       report.prices += priceStatements.length;
     }
   }
-
-  return report;
 }
 
 /** Everything the app needs for a first install of one game. */
