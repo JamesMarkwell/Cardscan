@@ -123,14 +123,28 @@ jobs:
           games="$GAMES"
           [ "$games" = "all" ] && games="onepiece pokemon mtg yugioh lorcana"
 
+          # The import runs a few sets per request to stay under Cloudflare's
+          # per-invocation subrequest limit, and reports whether more remain, so
+          # each game is driven by calling it until the response says done. Each
+          # call is a fresh Worker invocation with its own budget.
           for game in $games; do
             echo "::group::$game"
-            # The import walks every set in the game one request per second, so
-            # give it room.
-            curl --fail-with-body --silent --show-error --max-time 3600 \
-              -X POST "${WORKER_URL}/admin/refresh?game=${game}" \
-              -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" | tee "refresh-${game}.json"
-            echo
+            batch=0
+            while :; do
+              batch=$((batch + 1))
+              resp="$(curl --fail-with-body --silent --show-error --max-time 300 \
+                -X POST "${WORKER_URL}/admin/refresh?game=${game}" \
+                -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}")"
+              echo "$resp" | tee "refresh-${game}.json"
+              echo
+              done="$(printf '%s' "$resp" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).done))}catch{process.stdout.write("error")}})')"
+              case "$done" in
+                true) break ;;
+                false) ;;
+                *) echo "Unexpected refresh response for ${game}"; exit 1 ;;
+              esac
+              if [ "$batch" -ge 500 ]; then echo "Gave up on ${game} after ${batch} batches"; exit 1; fi
+            done
             echo "::endgroup::"
           done
 
