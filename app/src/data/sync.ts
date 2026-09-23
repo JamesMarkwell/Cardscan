@@ -16,8 +16,10 @@ export interface GameManifest {
   version: string;
   printingsCount: number;
   catalogUrl: string;
-  indexUrl: string;
-  indexIdsUrl: string;
+  // Present only once the fingerprint job has published a scan index for this
+  // version. Absent until then — the catalog still syncs, scanning waits.
+  indexUrl?: string;
+  indexIdsUrl?: string;
   deltas: Array<{ from: string; to: string; url: string }>;
 }
 
@@ -210,9 +212,18 @@ export async function syncGame(
     onProgress?.({ stage: 'catalog', game: game.game, ratio: 1 });
   }
 
-  onProgress?.({ stage: 'index', game: game.game, ratio: 0 });
-  await saveIndexPack(game.game, game.version, game.indexUrl, game.indexIdsUrl);
-  onProgress?.({ stage: 'index', game: game.game, ratio: 1 });
+  // The scan index is published by the fingerprint job, after and separately
+  // from the catalog. It may not exist yet, so a missing or failed index must
+  // not fail an otherwise-good catalog sync — scanning simply waits for it.
+  if (game.indexUrl && game.indexIdsUrl) {
+    onProgress?.({ stage: 'index', game: game.game, ratio: 0 });
+    try {
+      await saveIndexPack(game.game, game.version, game.indexUrl, game.indexIdsUrl);
+      onProgress?.({ stage: 'index', game: game.game, ratio: 1 });
+    } catch {
+      // Index not available yet; the catalog is still synced below.
+    }
+  }
 
   await setVersion(game.game, game.version, game.printingsCount);
   return true;

@@ -70,8 +70,10 @@ export interface GameManifest {
   version: string;
   printingsCount: number;
   catalogUrl: string;
-  indexUrl: string;
-  indexIdsUrl: string;
+  // Present only once the fingerprint job has published an index pack for this
+  // version. Until then the app syncs the catalog and scanning waits.
+  indexUrl?: string;
+  indexIdsUrl?: string;
   deltas: Array<{ from: string; to: string; url: string }>;
 }
 
