@@ -102,6 +102,7 @@ export default function App() {
               gameId={settings.gameId}
               indexReady={indexReady}
               syncing={syncing}
+              paused={result !== null}
               onGameChange={(gameId) => setSettings((current) => ({ ...current, gameId }))}
               onResult={setResult}
             />

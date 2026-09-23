@@ -13,6 +13,9 @@ import { GAMES, GameId } from '../data/types';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
+// Idle gap between scan frames, so the JS thread is free for touches in between.
+const FRAME_GAP_MS = 450;
+
 const STATUS_TEXT: Record<string, string> = {
   'no-card': 'Point at a card',
   'bad-quad': 'Show all four corners',
@@ -29,9 +32,11 @@ interface Props {
   onResult: (result: ScanResult) => void;
   indexReady: boolean;
   syncing?: boolean;
+  /** Stop the scan loop while something else is on top (e.g. the result sheet). */
+  paused?: boolean;
 }
 
-export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady, syncing }: Props) {
+export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady, syncing, paused }: Props) {
   const [permission, requestPermission] = useCameraPermissions();
   const [status, setStatus] = useState('Starting camera');
   const [modelsReady, setModelsReady] = useState(false);
@@ -100,12 +105,29 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   }, [onResult, service]);
 
   useEffect(() => {
-    if (!modelsReady || !permission?.granted || busy) return undefined;
-    const timer = setInterval(() => {
-      void tick();
-    }, 450);
-    return () => clearInterval(timer);
-  }, [busy, modelsReady, permission?.granted, tick]);
+    if (!modelsReady || !permission?.granted || busy || paused) return undefined;
+
+    // Schedule the next frame only after the current one finishes, plus a fixed
+    // gap. A plain setInterval fires again the moment a frame's work clears the
+    // JS thread, so heavy frames run back-to-back and starve the thread — and a
+    // starved JS thread makes React Native drop touches, which is why the tab
+    // bar stopped responding while scanning. The gap guarantees idle time for
+    // touch handling between frames.
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const loop = async () => {
+      if (!active) return;
+      await tick();
+      if (active) timer = setTimeout(() => void loop(), FRAME_GAP_MS);
+    };
+
+    timer = setTimeout(() => void loop(), FRAME_GAP_MS);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [busy, modelsReady, permission?.granted, paused, tick]);
 
   if (!permission) {
     return (
