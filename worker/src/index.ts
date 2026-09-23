@@ -83,13 +83,22 @@ app.get('/manifest.json', async (c) => {
         url: packUrl(origin, c.env, `games/${row.gameId}/delta-${from}-${versions[index]}.json`),
       }));
 
+      // The index pack is published by the fingerprint job, separately and
+      // later than the catalog. Advertise its URLs only once that key exists, so
+      // the app doesn't try to download a 404 and fail an otherwise good sync.
+      const indexKey = row.indexPackKey as string | null;
+
       return {
         game: row.gameId as GameId,
         version: row.version,
         printingsCount: row.printingsCount,
         catalogUrl: packUrl(origin, c.env, `games/${row.gameId}/catalog-${row.version}.json`),
-        indexUrl: packUrl(origin, c.env, `games/${row.gameId}/index-${row.version}.bin`),
-        indexIdsUrl: packUrl(origin, c.env, `games/${row.gameId}/index-${row.version}.ids`),
+        ...(indexKey
+          ? {
+              indexUrl: packUrl(origin, c.env, indexKey),
+              indexIdsUrl: packUrl(origin, c.env, indexKey.replace(/\.bin$/, '.ids')),
+            }
+          : {}),
         deltas,
       };
     }),

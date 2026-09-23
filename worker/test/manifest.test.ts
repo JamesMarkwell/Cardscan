@@ -89,6 +89,26 @@ describe('manifest', () => {
     expect(body.games[0].catalogUrl).not.toContain('//packs');
   });
 
+  it('omits the index URLs until a fingerprint pack has been published', async () => {
+    stubFetch();
+    await runRefresh(env, ['onepiece']);
+
+    const before = await manifest();
+    expect(before.games[0].indexUrl).toBeUndefined();
+    expect(before.games[0].indexIdsUrl).toBeUndefined();
+
+    // The fingerprint job records the published index key.
+    const version = before.games[0].version;
+    await db
+      .prepare('UPDATE catalog_versions SET index_pack_key = ? WHERE game_id = ? AND version = ?')
+      .bind(`games/onepiece/index-${version}.bin`, 'onepiece', version)
+      .run();
+
+    const after = await manifest();
+    expect(after.games[0].indexUrl).toMatch(new RegExp(`/packs/games/onepiece/index-${version}\\.bin$`));
+    expect(after.games[0].indexIdsUrl).toMatch(new RegExp(`/packs/games/onepiece/index-${version}\\.ids$`));
+  });
+
   it('points at a catalog pack that is actually there', async () => {
     stubFetch();
     await runRefresh(env, ['onepiece']);
