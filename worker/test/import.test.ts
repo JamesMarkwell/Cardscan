@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildDelta, buildFullDelta, importGame, importGameBatch, nextVersion } from '../src/catalog';
-import { runRefresh, runRefreshStep } from '../src/index';
+import { app, runRefresh, runRefreshStep } from '../src/index';
 import { Env } from '../src/types';
 import { LocalD1, LocalR2 } from './support/localD1';
 
@@ -412,5 +412,72 @@ describe('runRefreshStep', () => {
     const only = await runRefreshStep(env, { game: 'onepiece', batchSize: 50 });
     expect(only.done).toBe(true);
     expect(only.report).toMatchObject({ game: 'onepiece', sets: 2, printings: 4 });
+  });
+});
+
+describe('admin/fingerprints-done', () => {
+  let db: LocalD1;
+  let env: Env;
+
+  beforeEach(() => {
+    db = new LocalD1();
+    db.applyMigration(MIGRATION);
+    env = {
+      DB: db as unknown as D1Database,
+      PACKS: new LocalR2() as unknown as R2Bucket,
+      USER_AGENT: 'CardScan-test/0.1',
+      SOURCE_MIN_INTERVAL_MS: '0',
+      PUBLIC_BASE_URL: '',
+      WORKER_ADMIN_TOKEN: 'secret',
+    };
+    // A game exists from the migration seed. Add a version, a card and a set,
+    // then 150 printings — enough to cross the 90-id chunk boundary twice.
+    db.prepare("INSERT INTO catalog_versions (game_id, version, created_at, printings_count) VALUES ('onepiece', '20260101', '2026-01-01', 150)").run();
+    db.prepare("INSERT INTO sets (id, game_id, code, name) VALUES ('s1', 'onepiece', 'OP01', 'Set 1')").run();
+    db.prepare("INSERT INTO cards (id, game_id, name, art_id) VALUES ('c1', 'onepiece', 'Card', 'a1')").run();
+    for (let i = 0; i < 150; i += 1) {
+      db.prepare(
+        "INSERT INTO printings (id, card_id, game_id, set_id, number, updated_at) VALUES (?, ?, 'onepiece', 's1', ?, '2026-01-01')",
+      )
+        .bind(`p${i}`, 'c1', String(i))
+        .run();
+    }
+  });
+
+  it('marks every printing done across chunk boundaries and records the index key', async () => {
+    const printingIds = Array.from({ length: 150 }, (_, i) => `p${i}`);
+    const response = await app.fetch(
+      new Request('https://cardscan-worker.workers.dev/admin/fingerprints-done', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer secret', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          game: 'onepiece',
+          version: '20260101',
+          printingIds,
+          indexPackKey: 'games/onepiece/index-20260101.bin',
+        }),
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    const done = db.query<{ n: number }>('SELECT COUNT(*) AS n FROM printings WHERE fingerprinted_at IS NOT NULL')[0];
+    expect(done.n).toBe(150);
+    const version = db.query<{ index_pack_key: string }>(
+      "SELECT index_pack_key FROM catalog_versions WHERE game_id = 'onepiece'",
+    )[0];
+    expect(version.index_pack_key).toBe('games/onepiece/index-20260101.bin');
+  });
+
+  it('rejects an unauthorised call', async () => {
+    const response = await app.fetch(
+      new Request('https://cardscan-worker.workers.dev/admin/fingerprints-done', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ game: 'onepiece', version: '20260101', printingIds: [], indexPackKey: 'k' }),
+      }),
+      env,
+    );
+    expect(response.status).toBe(401);
   });
 });

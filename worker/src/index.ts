@@ -181,8 +181,11 @@ app.post('/admin/fingerprints-done', async (c) => {
   const body = (await c.req.json()) as { game: GameId; version: string; printingIds: string[]; indexPackKey: string };
   const now = new Date().toISOString();
 
+  // D1 allows at most 100 bound parameters per query, and this statement also
+  // binds `now`, so a chunk of 100 ids would total 101 and fail with
+  // "too many SQL variables". Keep each chunk to 90 ids (91 params) for headroom.
   const chunks: string[][] = [];
-  for (let i = 0; i < body.printingIds.length; i += 100) chunks.push(body.printingIds.slice(i, i + 100));
+  for (let i = 0; i < body.printingIds.length; i += 90) chunks.push(body.printingIds.slice(i, i + 90));
 
   for (const chunk of chunks) {
     await c.env.DB.prepare(
