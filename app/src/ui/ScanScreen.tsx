@@ -13,8 +13,13 @@ import { GAMES, GameId } from '../data/types';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
-// Idle gap between scan frames, so the JS thread is free for touches in between.
-const FRAME_GAP_MS = 450;
+// Idle gap between scan frames. Each frame blocks the JS thread synchronously
+// (JPEG decode, resize, tensor packing) for a few hundred ms, and React Native
+// dispatches touches on that same thread — so the gap has to be long enough to
+// leave generous idle windows for taps (tab bar, game chips) to register. The
+// capture gate still needs three steady frames to lock, so a ~900ms cadence
+// barely changes time-to-scan while keeping the UI responsive.
+const FRAME_GAP_MS = 900;
 
 const STATUS_TEXT: Record<string, string> = {
   'no-card': 'Point at a card',
@@ -105,7 +110,11 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   }, [onResult, service]);
 
   useEffect(() => {
-    if (!modelsReady || !permission?.granted || busy || paused) return undefined;
+    // Also hold the loop while the catalogue is syncing: that work (downloading,
+    // SQLite writes, loading the index pack) already contends for the JS thread,
+    // and stacking frame processing on top is what makes the UI seize up during
+    // the first-launch "Updating catalogue…" window.
+    if (!modelsReady || !permission?.granted || busy || paused || syncing) return undefined;
 
     // Each scan frame does heavy synchronous work on the JS thread (JPEG decode,
     // resize, tensor packing, sharpness) — the same thread React Native uses to
@@ -136,7 +145,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       clearTimeout(timer);
       handle?.cancel();
     };
-  }, [busy, modelsReady, permission?.granted, paused, tick]);
+  }, [busy, modelsReady, permission?.granted, paused, syncing, tick]);
 
   if (!permission) {
     return (
