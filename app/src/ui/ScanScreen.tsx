@@ -8,7 +8,7 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Haptics from 'expo-haptics';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
 import { GAMES, GameId } from '../data/types';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
@@ -107,25 +107,34 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   useEffect(() => {
     if (!modelsReady || !permission?.granted || busy || paused) return undefined;
 
-    // Schedule the next frame only after the current one finishes, plus a fixed
-    // gap. A plain setInterval fires again the moment a frame's work clears the
-    // JS thread, so heavy frames run back-to-back and starve the thread — and a
-    // starved JS thread makes React Native drop touches, which is why the tab
-    // bar stopped responding while scanning. The gap guarantees idle time for
-    // touch handling between frames.
+    // Each scan frame does heavy synchronous work on the JS thread (JPEG decode,
+    // resize, tensor packing, sharpness) — the same thread React Native uses to
+    // dispatch touches. A fixed gap alone is not enough: the next frame is still
+    // scheduled unconditionally, so a tab-bar tap that lands while a frame runs
+    // (or just as the next starts) is starved out, and the tabs feel dead.
+    //
+    // So after the gap we hand off to InteractionManager, which holds the frame
+    // back until RN has finished any pending touches/gestures. A tab tap always
+    // wins the thread first; the frame runs only once the UI is idle again.
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
+    let handle: ReturnType<typeof InteractionManager.runAfterInteractions> | undefined;
 
-    const loop = async () => {
-      if (!active) return;
-      await tick();
-      if (active) timer = setTimeout(() => void loop(), FRAME_GAP_MS);
+    const schedule = () => {
+      timer = setTimeout(() => {
+        handle = InteractionManager.runAfterInteractions(async () => {
+          if (!active) return;
+          await tick();
+          if (active) schedule();
+        });
+      }, FRAME_GAP_MS);
     };
 
-    timer = setTimeout(() => void loop(), FRAME_GAP_MS);
+    schedule();
     return () => {
       active = false;
       clearTimeout(timer);
+      handle?.cancel();
     };
   }, [busy, modelsReady, permission?.granted, paused, tick]);
 
