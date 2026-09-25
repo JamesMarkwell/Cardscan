@@ -45,6 +45,13 @@ const DEFAULTS: Required<ScanOptions> = {
   topK: 10,
 };
 
+// A confident upright cosine match. Above this we trust the upright reading and
+// skip the 180-degree retry — its embed re-runs toImageNetTensor (a ~600k-element
+// loop) and rotate180 (~800k) on the JS thread, doubling the per-frame cost the
+// index turns on. Only a weak upright match (an upside-down or not-yet-matched
+// card) is worth paying for the retry.
+const ROTATION_RETRY_BELOW = 0.6;
+
 export interface FrameResult {
   detection: Detection;
   /** Null when the frame was rejected before embedding. */
@@ -170,12 +177,17 @@ export class ScanPipeline {
     let embedding = await this.embed(crop);
     let candidates = this.index ? search(this.index, embedding, this.options.topK) : [];
 
-    // Milo is sensitive to upside-down cards, so try the rotation and keep
-    // whichever direction matched more strongly.
-    if (this.options.tryRotated && this.index) {
+    // Milo is sensitive to upside-down cards, so try the 180-degree rotation and
+    // keep whichever direction matched more strongly. Both the second embed's
+    // tensor packing and rotate180 run on the JS thread, so doing this on every
+    // frame doubles the per-frame cost the moment an index is loaded — enough to
+    // starve touch handling (the tab bar and game chips stop responding). Only
+    // pay for it when the upright match is weak, which is the only case it can
+    // change the answer: a confident upright card keeps the single-embed cost.
+    const bestUpright = candidates[0]?.score ?? -Infinity;
+    if (this.options.tryRotated && this.index && bestUpright < ROTATION_RETRY_BELOW) {
       const rotatedEmbedding = await this.embed(rotate180(crop));
       const rotatedCandidates = search(this.index, rotatedEmbedding, this.options.topK);
-      const bestUpright = candidates[0]?.score ?? -Infinity;
       const bestRotated = rotatedCandidates[0]?.score ?? -Infinity;
       if (bestRotated > bestUpright) {
         embedding = rotatedEmbedding;
