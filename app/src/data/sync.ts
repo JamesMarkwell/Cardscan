@@ -181,10 +181,37 @@ export interface SyncProgress {
   ratio?: number;
 }
 
+// Serialise every catalog sync process-wide. The app auto-syncs (on launch and
+// when the game changes) and the Settings screen has a manual "Sync catalog now"
+// button; tapping it also updates apiBaseUrl, which re-triggers the auto-sync.
+// Two syncs overlapping would run applyDelta's withTransactionAsync at the same
+// time on the one shared SQLite connection — a nested BEGIN, which SQLite rejects
+// with "cannot start a transaction within a transaction". A single in-flight
+// queue means the second caller simply waits, then no-ops once the first has
+// brought the version up to date.
+let syncQueue: Promise<unknown> = Promise.resolve();
+
 /**
- * Bring one game up to date. Returns true when anything changed.
+ * Bring one game up to date. Returns true when anything changed. Calls are
+ * serialised, so overlapping syncs run one after another rather than racing on
+ * the shared database transaction.
  */
-export async function syncGame(
+export function syncGame(
+  baseUrl: string,
+  game: GameManifest,
+  onProgress?: (progress: SyncProgress) => void,
+): Promise<boolean> {
+  const next = syncQueue.then(() => runSyncGame(baseUrl, game, onProgress));
+  // Keep the queue going whether or not this sync resolved, but don't let the
+  // chain swallow this call's own error — the caller still sees it.
+  syncQueue = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
+async function runSyncGame(
   baseUrl: string,
   game: GameManifest,
   onProgress?: (progress: SyncProgress) => void,
