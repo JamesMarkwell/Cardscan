@@ -65,11 +65,27 @@ export class ScanService {
   }
 
   /**
-   * Feed one photo. Returns a result once enough frames have agreed, or null
-   * while it is still gathering, along with why nothing happened.
+   * Feed one photo file. Decodes it to RGBA, then hands off to {@link offerImage}.
+   * Used by the accuracy harness and any file-based path.
    */
   async offerPhoto(uri: string): Promise<{ result: ScanResult | null; status: string }> {
     const frame = await loadFrame(uri);
+    return this.offerImage(frame, uri);
+  }
+
+  /**
+   * Feed one already-decoded RGBA frame — the live camera path, which gets the
+   * pixels straight from the camera pipeline (off the UI thread) and so skips
+   * the JPEG decode entirely. Returns a result once enough frames have agreed,
+   * or null while it is still gathering, along with why nothing happened.
+   *
+   * `photoUri` is only needed for OCR disambiguation, which the live path does
+   * not have a file for; passing null simply skips OCR.
+   */
+  async offerImage(
+    frame: import('./image').RgbaImage,
+    photoUri: string | null = null,
+  ): Promise<{ result: ScanResult | null; status: string }> {
     const processed = await this.pipeline.processFrame(frame);
 
     if (processed.rejected) {
@@ -86,7 +102,7 @@ export class ScanService {
       return { result: null, status: `frame ${this.frames.length}/${wanted}` };
     }
 
-    const result = await this.finish(uri);
+    const result = await this.finish(photoUri);
     this.reset();
     return { result, status: 'done' };
   }
