@@ -41,15 +41,46 @@ interface Props {
   paused?: boolean;
 }
 
+/** Pick the smallest capture the device offers that is still wide enough for the
+ * working buffer. `takePictureAsync` otherwise grabs a full-sensor still (~12MP)
+ * every frame and encodes it on the UI thread — enough to jank touch handling —
+ * when the pipeline only ever downscales to WORKING_WIDTH. Sizes are "WxH". */
+function smallestUsablePictureSize(sizes: string[]): string | undefined {
+  const parsed = sizes
+    .map((size) => {
+      const [w, h] = size.split('x').map((n) => Number.parseInt(n, 10));
+      return Number.isFinite(w) && Number.isFinite(h) ? { size, w, h, area: w * h } : null;
+    })
+    .filter((entry): entry is { size: string; w: number; h: number; area: number } => entry !== null)
+    .sort((a, b) => a.area - b.area);
+  if (parsed.length === 0) return undefined;
+  // Enough resolution for the 540px working buffer; fall back to the smallest.
+  return (parsed.find((entry) => Math.max(entry.w, entry.h) >= 720) ?? parsed[0]).size;
+}
+
 export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady, syncing, paused }: Props) {
   const [permission, requestPermission] = useCameraPermissions();
   const [status, setStatus] = useState('Starting camera');
   const [modelsReady, setModelsReady] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [pictureSize, setPictureSize] = useState<string | undefined>(undefined);
 
   const camera = useRef<CameraView | null>(null);
   const looping = useRef(false);
   const mounted = useRef(true);
+
+  // Once the camera is ready, drop the capture resolution to the smallest the
+  // device supports. Best-effort: if the query fails we keep the default.
+  const onCameraReady = useCallback(async () => {
+    try {
+      const sizes = await camera.current?.getAvailablePictureSizesAsync();
+      if (sizes && sizes.length > 0 && mounted.current) {
+        setPictureSize(smallestUsablePictureSize(sizes));
+      }
+    } catch {
+      // Leave the default capture size.
+    }
+  }, []);
 
   useEffect(() => {
     mounted.current = true;
@@ -169,7 +200,18 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
 
   return (
     <View style={styles.container}>
-      <CameraView ref={camera} style={StyleSheet.absoluteFill} facing="back" autofocus="on" />
+      <CameraView
+        ref={camera}
+        style={StyleSheet.absoluteFill}
+        facing="back"
+        autofocus="on"
+        // No shutter animation: the scan loop captures continuously, and the
+        // per-capture animation runs on the UI thread — enough repetition to
+        // stall touch handling (the tab bar and game chips stop responding).
+        animateShutter={false}
+        pictureSize={pictureSize}
+        onCameraReady={() => void onCameraReady()}
+      />
 
       <View pointerEvents="none" style={styles.frameGuide} />
 
