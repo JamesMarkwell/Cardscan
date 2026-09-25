@@ -4,12 +4,14 @@ compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
 
 # The refresh imports a few sets per invocation to stay under Cloudflare's
-# per-invocation subrequest limit, so the cron ticks often and works through a
-# game over successive ticks. A tick with nothing due is a cheap no-op (a couple
-# of D1 reads, no upstream requests). Built games are refreshed about once a day
-# (see REFRESH_STALE_MS in src/index.ts).
+# per-invocation subrequest limit, working through a game over successive ticks.
+# Hourly (not every 10 min) keeps the D1 read load and contention low — an
+# aggressive cadence re-imports the large catalogs often enough to crowd out
+# other queries (e.g. the fingerprint job) on the free tier. A tick with nothing
+# due is a cheap no-op. Built games are refreshed about once a day (see
+# REFRESH_STALE_MS in src/index.ts).
 [triggers]
-crons = ["*/10 * * * *"]
+crons = ["0 * * * *"]
 
 [[d1_databases]]
 binding = "DB"

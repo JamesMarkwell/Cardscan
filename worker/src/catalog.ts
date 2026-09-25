@@ -213,21 +213,27 @@ export async function buildDelta(env: Env, game: GameId, from: string, to: strin
     .bind(game, since)
     .all();
 
-  const changedIds = new Set((printings.results as unknown as PrintingRow[]).map((row) => row.cardId));
-  const cards = changedIds.size
-    ? await env.DB.prepare(
-        `SELECT id, game_id AS gameId, name, art_id AS artId FROM cards
-         WHERE game_id = ? AND id IN (${[...changedIds].map(() => '?').join(',')})`,
-      )
-        .bind(game, ...changedIds)
-        .all()
-    : { results: [] };
+  // Fetch the changed cards in chunks: D1 caps a query at 100 bound parameters,
+  // and this binds `game` alongside the ids, so a delta touching 100+ cards
+  // would overflow "too many SQL variables". 90 ids per chunk stays clear.
+  const changedIds = [...new Set((printings.results as unknown as PrintingRow[]).map((row) => row.cardId))];
+  const cardRows: unknown[] = [];
+  for (let i = 0; i < changedIds.length; i += 90) {
+    const chunk = changedIds.slice(i, i + 90);
+    const result = await env.DB.prepare(
+      `SELECT id, game_id AS gameId, name, art_id AS artId FROM cards
+       WHERE game_id = ? AND id IN (${chunk.map(() => '?').join(',')})`,
+    )
+      .bind(game, ...chunk)
+      .all();
+    cardRows.push(...result.results);
+  }
 
   return {
     from,
     to,
     sets: [],
-    cards: cards.results as unknown as CatalogDelta['cards'],
+    cards: cardRows as unknown as CatalogDelta['cards'],
     printings: printings.results as unknown as PrintingRow[],
     prices: prices.results as unknown as PriceRow[],
     removedPrintings: [],
