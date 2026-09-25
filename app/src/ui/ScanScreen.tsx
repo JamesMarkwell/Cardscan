@@ -1,25 +1,30 @@
 /**
  * Camera screen: live auto-scan, no shutter button.
  *
- * The camera keeps taking small photos; the pipeline decides which ones are
- * worth embedding. The overlay explains what it is waiting for rather than
- * leaving the user guessing.
+ * Uses react-native-vision-camera: the preview renders natively and frames are
+ * delivered on the Camera's own worklet thread — never the JS/UI thread — so the
+ * bottom tab bar and game chips stay responsive while scanning. Each delivered
+ * frame is already RGB at a small target resolution (no JPEG decode), copied to
+ * a compact RGBA buffer in the worklet and handed to JS via runOnJS, where the
+ * existing pipeline identifies the card.
  */
-import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Haptics from 'expo-haptics';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Camera, useCameraDevice, useCameraPermission, useFrameOutput } from 'react-native-vision-camera';
+import { runOnJS } from 'react-native-worklets';
 import { GAMES, GameId } from '../data/types';
+import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
-// Idle gap between scan frames. Each frame blocks the JS thread synchronously
-// (JPEG decode, resize, tensor packing) for a few hundred ms, and React Native
-// dispatches touches on that same thread — so the gap has to be long enough to
-// leave generous idle windows for taps (tab bar, game chips) to register. The
-// capture gate still needs three steady frames to lock, so a ~900ms cadence
-// barely changes time-to-scan while keeping the UI responsive.
-const FRAME_GAP_MS = 900;
+// Frame delivery rate. Frames arrive on the Camera worklet thread, but each one
+// still schedules a little work on JS (the pipeline), so we cap the camera at a
+// modest rate rather than the full preview rate. Tunable.
+const TARGET_FPS = 8;
+// Small working frame: the detector wants 384 and the dewarped crop 448, so this
+// oversamples both while keeping the per-frame copy cheap.
+const TARGET_RESOLUTION = { width: 960, height: 540 };
 
 const STATUS_TEXT: Record<string, string> = {
   'no-card': 'Point at a card',
@@ -37,50 +42,18 @@ interface Props {
   onResult: (result: ScanResult) => void;
   indexReady: boolean;
   syncing?: boolean;
-  /** Stop the scan loop while something else is on top (e.g. the result sheet). */
+  /** Stop scanning while something else is on top (e.g. the result sheet). */
   paused?: boolean;
 }
 
-/** Pick the smallest capture the device offers that is still wide enough for the
- * working buffer. `takePictureAsync` otherwise grabs a full-sensor still (~12MP)
- * every frame and encodes it on the UI thread — enough to jank touch handling —
- * when the pipeline only ever downscales to WORKING_WIDTH. Sizes are "WxH". */
-function smallestUsablePictureSize(sizes: string[]): string | undefined {
-  const parsed = sizes
-    .map((size) => {
-      const [w, h] = size.split('x').map((n) => Number.parseInt(n, 10));
-      return Number.isFinite(w) && Number.isFinite(h) ? { size, w, h, area: w * h } : null;
-    })
-    .filter((entry): entry is { size: string; w: number; h: number; area: number } => entry !== null)
-    .sort((a, b) => a.area - b.area);
-  if (parsed.length === 0) return undefined;
-  // Enough resolution for the 540px working buffer; fall back to the smallest.
-  return (parsed.find((entry) => Math.max(entry.w, entry.h) >= 720) ?? parsed[0]).size;
-}
-
 export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady, syncing, paused }: Props) {
-  const [permission, requestPermission] = useCameraPermissions();
+  const { hasPermission, requestPermission } = useCameraPermission();
+  const device = useCameraDevice('back');
   const [status, setStatus] = useState('Starting camera');
   const [modelsReady, setModelsReady] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [pictureSize, setPictureSize] = useState<string | undefined>(undefined);
 
-  const camera = useRef<CameraView | null>(null);
-  const looping = useRef(false);
+  const busy = useRef(false);
   const mounted = useRef(true);
-
-  // Once the camera is ready, drop the capture resolution to the smallest the
-  // device supports. Best-effort: if the query fails we keep the default.
-  const onCameraReady = useCallback(async () => {
-    try {
-      const sizes = await camera.current?.getAvailablePictureSizesAsync();
-      if (sizes && sizes.length > 0 && mounted.current) {
-        setPictureSize(smallestUsablePictureSize(sizes));
-      }
-    } catch {
-      // Leave the default capture size.
-    }
-  }, []);
 
   useEffect(() => {
     mounted.current = true;
@@ -88,6 +61,10 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       mounted.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!hasPermission) void requestPermission();
+  }, [hasPermission, requestPermission]);
 
   useEffect(() => {
     let cancelled = false;
@@ -107,86 +84,77 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     };
   }, [service]);
 
-  const tick = useCallback(async () => {
-    if (!camera.current || looping.current) return;
-    looping.current = true;
+  const active = modelsReady && hasPermission && !paused && !syncing;
 
-    try {
-      const photo = await camera.current.takePictureAsync({
-        quality: 0.7,
-        skipProcessing: true,
-        shutterSound: false,
-      });
-      if (!photo?.uri || !mounted.current) return;
-
-      const { result, status: next } = await service.offerPhoto(photo.uri);
-      if (!mounted.current) return;
-
-      if (result) {
-        await Haptics.notificationAsync(
-          result.confidence.tier === 'high'
-            ? Haptics.NotificationFeedbackType.Success
-            : Haptics.NotificationFeedbackType.Warning,
-        );
-        onResult(result);
-        setStatus('Point at a card');
-      } else {
-        setStatus(STATUS_TEXT[next] ?? next);
-      }
-    } catch (error) {
-      setStatus((error as Error).message);
-    } finally {
-      looping.current = false;
-    }
-  }, [onResult, service]);
-
-  useEffect(() => {
-    // Also hold the loop while the catalogue is syncing: that work (downloading,
-    // SQLite writes, loading the index pack) already contends for the JS thread,
-    // and stacking frame processing on top is what makes the UI seize up during
-    // the first-launch "Updating catalogue…" window.
-    if (!modelsReady || !permission?.granted || busy || paused || syncing) return undefined;
-
-    // Each scan frame does heavy synchronous work on the JS thread (JPEG decode,
-    // resize, tensor packing, sharpness) — the same thread React Native uses to
-    // dispatch touches. A fixed gap alone is not enough: the next frame is still
-    // scheduled unconditionally, so a tab-bar tap that lands while a frame runs
-    // (or just as the next starts) is starved out, and the tabs feel dead.
-    //
-    // So after the gap we hand off to InteractionManager, which holds the frame
-    // back until RN has finished any pending touches/gestures. A tab tap always
-    // wins the thread first; the frame runs only once the UI is idle again.
-    let active = true;
-    let timer: ReturnType<typeof setTimeout>;
-    let handle: ReturnType<typeof InteractionManager.runAfterInteractions> | undefined;
-
-    const schedule = () => {
-      timer = setTimeout(() => {
-        handle = InteractionManager.runAfterInteractions(async () => {
-          if (!active) return;
-          await tick();
-          if (active) schedule();
+  // Runs on the JS thread, one frame at a time. `busy` drops any frame that
+  // arrives while the previous one is still being identified.
+  const handleFrame = useCallback(
+    (data: Uint8Array, width: number, height: number) => {
+      if (!mounted.current || busy.current || !active) return;
+      busy.current = true;
+      const image: RgbaImage = { data, width, height };
+      service
+        .offerImage(image)
+        .then(({ result, status: next }) => {
+          if (!mounted.current) return;
+          if (result) {
+            void Haptics.notificationAsync(
+              result.confidence.tier === 'high'
+                ? Haptics.NotificationFeedbackType.Success
+                : Haptics.NotificationFeedbackType.Warning,
+            );
+            onResult(result);
+            setStatus('Point at a card');
+          } else {
+            setStatus(STATUS_TEXT[next] ?? next);
+          }
+        })
+        .catch((error: Error) => mounted.current && setStatus(error.message))
+        .finally(() => {
+          busy.current = false;
         });
-      }, FRAME_GAP_MS);
-    };
+    },
+    [active, onResult, service],
+  );
 
-    schedule();
-    return () => {
-      active = false;
-      clearTimeout(timer);
-      handle?.cancel();
-    };
-  }, [busy, modelsReady, permission?.granted, paused, syncing, tick]);
+  const frameOutput = useFrameOutput({
+    pixelFormat: 'rgb',
+    targetResolution: TARGET_RESOLUTION,
+    // Hand us a display-upright buffer so the card is the right way up for the
+    // detector, regardless of sensor orientation.
+    enablePhysicalBufferRotation: true,
+    onFrame: (frame) => {
+      'worklet';
+      const plane = frame.getPlanes()[0];
+      if (plane == null) {
+        frame.dispose();
+        return;
+      }
+      const width = plane.width;
+      const height = plane.height;
+      const bytesPerRow = plane.bytesPerRow;
+      const src = new Uint8Array(plane.getPixelBuffer());
+      // 'rgb' is 3 bytes/pixel, but some pipelines negotiate a 4-byte layout;
+      // derive it from the row stride and copy into compact RGBA.
+      const channels = Math.max(3, Math.round(bytesPerRow / width));
+      const out = new Uint8Array(width * height * 4);
+      for (let y = 0; y < height; y += 1) {
+        const row = y * bytesPerRow;
+        for (let x = 0; x < width; x += 1) {
+          const s = row + x * channels;
+          const d = (y * width + x) * 4;
+          out[d] = src[s];
+          out[d + 1] = src[s + 1];
+          out[d + 2] = src[s + 2];
+          out[d + 3] = 255;
+        }
+      }
+      frame.dispose();
+      runOnJS(handleFrame)(out, width, height);
+    },
+  });
 
-  if (!permission) {
-    return (
-      <View style={styles.centred}>
-        <ActivityIndicator color={theme.accent} />
-      </View>
-    );
-  }
-
-  if (!permission.granted) {
+  if (!hasPermission) {
     return (
       <View style={styles.centred}>
         <Text style={styles.title}>Camera access needed</Text>
@@ -198,19 +166,23 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     );
   }
 
+  if (device == null) {
+    return (
+      <View style={styles.centred}>
+        <ActivityIndicator color={theme.accent} />
+        <Text style={styles.body}>No camera found.</Text>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
-      <CameraView
-        ref={camera}
+      <Camera
         style={StyleSheet.absoluteFill}
-        facing="back"
-        autofocus="on"
-        // No shutter animation: the scan loop captures continuously, and the
-        // per-capture animation runs on the UI thread — enough repetition to
-        // stall touch handling (the tab bar and game chips stop responding).
-        animateShutter={false}
-        pictureSize={pictureSize}
-        onCameraReady={() => void onCameraReady()}
+        device={device}
+        isActive={active}
+        outputs={frameOutput ? [frameOutput] : []}
+        constraints={[{ fps: TARGET_FPS }]}
       />
 
       <View pointerEvents="none" style={styles.frameGuide} />
@@ -219,10 +191,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
         {GAMES.map((game) => (
           <Pressable
             key={game.id}
-            onPress={() => {
-              onGameChange(game.id);
-              setBusy(false);
-            }}
+            onPress={() => onGameChange(game.id)}
             style={[styles.gameChip, game.id === gameId && styles.gameChipActive]}
           >
             <Text style={[styles.gameChipText, game.id === gameId && styles.gameChipTextActive]}>
