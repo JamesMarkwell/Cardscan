@@ -2,15 +2,16 @@
  * Camera screen: live auto-scan, no shutter button.
  *
  * Uses react-native-vision-camera: the preview renders natively and frames are
- * delivered on the Camera's own worklet thread — never the JS/UI thread — so the
- * bottom tab bar and game chips stay responsive while scanning. Each delivered
- * frame is already RGB at a small target resolution (no JPEG decode), copied to
- * a compact RGBA buffer in the worklet and handed to JS via runOnJS, where the
- * existing pipeline identifies the card.
+ * delivered on the Camera's own worklet thread. The worklet copies each frame
+ * into a compact RGBA buffer and hands it to JS, where the pipeline identifies
+ * the card. That marshalling and identification both land on the JS thread —
+ * the same thread React Native uses to dispatch touches — so the frame rate is
+ * kept low and each pipeline pass is gated behind an idle window, leaving the
+ * bottom tab bar and game chips responsive while scanning.
  */
 import * as Haptics from 'expo-haptics';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, useFrameOutput } from 'react-native-vision-camera';
 import { runOnJS } from 'react-native-worklets';
 import { GAMES, GameId } from '../data/types';
@@ -18,13 +19,23 @@ import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
-// Frame delivery rate. Frames arrive on the Camera worklet thread, but each one
-// still schedules a little work on JS (the pipeline), so we cap the camera at a
-// modest rate rather than the full preview rate. Tunable.
-const TARGET_FPS = 8;
-// Small working frame: the detector wants 384 and the dewarped crop 448, so this
-// oversamples both while keeping the per-frame copy cheap.
-const TARGET_RESOLUTION = { width: 960, height: 540 };
+// Frame delivery rate. Every delivered frame is marshalled from the Camera
+// worklet thread to the JS thread (a whole RGBA buffer) and then identified on
+// the JS thread — the same thread React Native dispatches touches on. So the
+// rate is what governs how much of that thread scanning consumes. A low rate
+// still identifies cards quickly (the capture gate only needs 3 steady frames,
+// ~1s at 4fps) while leaving the JS thread mostly free for the tab bar and chips.
+const TARGET_FPS = 4;
+// Working frame. The detector squashes to 384 and the dewarped crop is 448, so
+// this still oversamples both — while keeping the buffer marshalled to JS each
+// frame small (640x360x4 ≈ 0.9MB vs 2MB at 960x540), which is pure JS-thread cost.
+const TARGET_RESOLUTION = { width: 640, height: 360 };
+// Minimum idle window between pipeline passes. Each pass blocks the JS thread in
+// bursts (tensor packing, the blur check, the index search); without a gap the
+// next frame starts the moment one finishes and touches never get the thread.
+// After the gap we also wait for InteractionManager, so a tab-bar tap always
+// wins the thread first and the next frame runs only once the UI is idle again.
+const FRAME_GAP_MS = 150;
 
 const STATUS_TEXT: Record<string, string> = {
   'no-card': 'Point at a card',
@@ -52,7 +63,11 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   const [status, setStatus] = useState('Starting camera');
   const [modelsReady, setModelsReady] = useState(false);
 
-  const busy = useRef(false);
+  // The newest frame the worklet has handed us, waiting to be processed. Frames
+  // arrive faster than the pipeline runs, so we only ever keep the latest one
+  // and drop the rest — a stale frame is worthless for a live scan anyway.
+  const pendingFrame = useRef<RgbaImage | null>(null);
+  const processing = useRef(false);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -86,36 +101,66 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
 
   const active = modelsReady && hasPermission && !paused && !syncing;
 
-  // Runs on the JS thread, one frame at a time. `busy` drops any frame that
-  // arrives while the previous one is still being identified.
-  const handleFrame = useCallback(
-    (data: Uint8Array, width: number, height: number) => {
-      if (!mounted.current || busy.current || !active) return;
-      busy.current = true;
-      const image: RgbaImage = { data, width, height };
-      service
-        .offerImage(image)
-        .then(({ result, status: next }) => {
-          if (!mounted.current) return;
-          if (result) {
-            void Haptics.notificationAsync(
-              result.confidence.tier === 'high'
-                ? Haptics.NotificationFeedbackType.Success
-                : Haptics.NotificationFeedbackType.Warning,
-            );
-            onResult(result);
-            setStatus('Point at a card');
-          } else {
-            setStatus(STATUS_TEXT[next] ?? next);
+  // Runs on the JS thread for every delivered frame, but does almost nothing:
+  // it just stashes the latest frame. The heavy identification is driven
+  // separately (below) so it can be throttled and yielded around touches.
+  const handleFrame = useCallback((data: Uint8Array, width: number, height: number) => {
+    if (mounted.current) pendingFrame.current = { data, width, height };
+  }, []);
+
+  // Identify the latest stashed frame, then reschedule — but only after a short
+  // idle gap and once InteractionManager reports the UI is idle, so taps on the
+  // tab bar and game chips are always serviced before the next pipeline pass.
+  useEffect(() => {
+    if (!active) return undefined;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let interaction: ReturnType<typeof InteractionManager.runAfterInteractions> | undefined;
+
+    const schedule = () => {
+      timer = setTimeout(() => {
+        interaction = InteractionManager.runAfterInteractions(async () => {
+          if (cancelled) return;
+          const frame = pendingFrame.current;
+          pendingFrame.current = null;
+
+          if (frame && !processing.current) {
+            processing.current = true;
+            try {
+              const { result, status: next } = await service.offerImage(frame);
+              if (!cancelled && mounted.current) {
+                if (result) {
+                  void Haptics.notificationAsync(
+                    result.confidence.tier === 'high'
+                      ? Haptics.NotificationFeedbackType.Success
+                      : Haptics.NotificationFeedbackType.Warning,
+                  );
+                  onResult(result);
+                  setStatus('Point at a card');
+                } else {
+                  setStatus(STATUS_TEXT[next] ?? next);
+                }
+              }
+            } catch (error) {
+              if (!cancelled && mounted.current) setStatus((error as Error).message);
+            } finally {
+              processing.current = false;
+            }
           }
-        })
-        .catch((error: Error) => mounted.current && setStatus(error.message))
-        .finally(() => {
-          busy.current = false;
+
+          if (!cancelled) schedule();
         });
-    },
-    [active, onResult, service],
-  );
+      }, FRAME_GAP_MS);
+    };
+
+    schedule();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      interaction?.cancel();
+    };
+  }, [active, onResult, service]);
 
   const frameOutput = useFrameOutput({
     pixelFormat: 'rgb',
