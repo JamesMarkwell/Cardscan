@@ -112,6 +112,11 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   }, [service]);
 
   const active = modelsReady && hasPermission && !paused && !syncing;
+  // Whether the Camera itself streams a preview. Scanning needs the models and a
+  // settled catalogue, but the preview does not — so in the diagnostic we turn
+  // the camera on as soon as we have permission, ignoring the sync gate that was
+  // keeping it black. (With scanning on, camera activity follows `active`.)
+  const cameraActive = SCAN_ENABLED ? active : hasPermission;
 
   // Runs on the JS thread for every delivered frame, but does almost nothing:
   // it just stashes the latest frame. The heavy identification is driven
@@ -237,7 +242,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       <Camera
         style={StyleSheet.absoluteFill}
         device={device}
-        isActive={active}
+        isActive={cameraActive}
         outputs={SCAN_ENABLED && frameOutput ? [previewOutput, frameOutput] : [previewOutput]}
         constraints={[{ fps: TARGET_FPS }]}
       />
