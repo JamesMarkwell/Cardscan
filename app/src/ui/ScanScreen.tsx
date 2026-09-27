@@ -37,6 +37,15 @@ const TARGET_RESOLUTION = { width: 640, height: 360 };
 // wins the thread first and the next frame runs only once the UI is idle again.
 const FRAME_GAP_MS = 150;
 
+// TEMPORARY DIAGNOSTIC. The UI freezes the instant the camera turns on — before
+// any frame is identified — which rules out the identify pipeline. This isolates
+// the two remaining suspects: the vision-camera preview itself, versus the
+// per-frame delivery of buffers to the JS thread. With this false, the preview
+// renders but NO frames are delivered and NO scanning runs, so if the tab bar is
+// responsive the cause is frame delivery, and if it still freezes it is the
+// preview. Flip back to true (and revert this block) once we know which.
+const SCAN_ENABLED = false;
+
 const STATUS_TEXT: Record<string, string> = {
   'no-card': 'Point at a card',
   'bad-quad': 'Show all four corners',
@@ -112,7 +121,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   // idle gap and once InteractionManager reports the UI is idle, so taps on the
   // tab bar and game chips are always serviced before the next pipeline pass.
   useEffect(() => {
-    if (!active) return undefined;
+    if (!active || !SCAN_ENABLED) return undefined;
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -226,7 +235,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
         style={StyleSheet.absoluteFill}
         device={device}
         isActive={active}
-        outputs={frameOutput ? [frameOutput] : []}
+        outputs={SCAN_ENABLED && frameOutput ? [frameOutput] : []}
         constraints={[{ fps: TARGET_FPS }]}
       />
 
@@ -248,7 +257,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
 
       <View style={styles.statusBar}>
         {!modelsReady ? <ActivityIndicator color={theme.accent} /> : null}
-        <Text style={styles.statusText}>{status}</Text>
+        <Text style={styles.statusText}>{SCAN_ENABLED ? status : 'Diagnostic build: preview only (scanning off)'}</Text>
         {syncing ? (
           <Text style={styles.warning}>Updating catalogue…</Text>
         ) : !indexReady ? (
