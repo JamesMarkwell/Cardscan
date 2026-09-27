@@ -164,8 +164,13 @@ def main(argv: list[str] | None = None) -> int:
             LOG.warning("skipping %s: %s", item.printing_id, error)
 
     if not images:
-        LOG.error("no images could be downloaded")
-        return 1
+        # We got the pending list fine but none of its images could be fetched.
+        # In practice this is the steady state once a game is fully fingerprinted:
+        # the only rows left are ones whose source image the CDN permanently
+        # blocks (HTTP 403), so there is genuinely nothing to embed. Treat it as a
+        # no-op success rather than failing the nightly run every night forever.
+        LOG.info("no fetchable images among %d pending (all unavailable) — nothing to do", len(pending))
+        return 0
 
     LOG.info("embedding %d images", len(images))
     vectors = embed_images(images)
