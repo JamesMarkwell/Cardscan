@@ -12,7 +12,7 @@
 import * as Haptics from 'expo-haptics';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
-import { Camera, useCameraDevice, useCameraPermission, useFrameOutput } from 'react-native-vision-camera';
+import { Camera, useCameraDevice, useCameraPermission, useFrameOutput, usePreviewOutput } from 'react-native-vision-camera';
 import { runOnJS } from 'react-native-worklets';
 import { GAMES, GameId } from '../data/types';
 import { RgbaImage } from '../scan/image';
@@ -39,11 +39,11 @@ const FRAME_GAP_MS = 150;
 
 // TEMPORARY DIAGNOSTIC. The UI freezes the instant the camera turns on — before
 // any frame is identified — which rules out the identify pipeline. This isolates
-// the two remaining suspects: the vision-camera preview itself, versus the
-// per-frame delivery of buffers to the JS thread. With this false, the preview
-// renders but NO frames are delivered and NO scanning runs, so if the tab bar is
-// responsive the cause is frame delivery, and if it still freezes it is the
-// preview. Flip back to true (and revert this block) once we know which.
+// the two remaining suspects: the vision-camera live preview itself, versus the
+// per-frame delivery of buffers to the JS thread. With this false, a real live
+// preview renders (via the preview output) but NO frames are delivered to JS and
+// NO scanning runs — so if the tab bar is responsive the cause is frame delivery,
+// and if it still freezes it is the preview. Flip back to true once we know which.
 const SCAN_ENABLED = false;
 
 const STATUS_TEXT: Record<string, string> = {
@@ -69,6 +69,9 @@ interface Props {
 export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady, syncing, paused }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
+  // The live preview only renders when a preview output is connected — the
+  // migration was missing this, so the Camera showed nothing on its own.
+  const previewOutput = usePreviewOutput();
   const [status, setStatus] = useState('Starting camera');
   const [modelsReady, setModelsReady] = useState(false);
 
@@ -235,7 +238,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
         style={StyleSheet.absoluteFill}
         device={device}
         isActive={active}
-        outputs={SCAN_ENABLED && frameOutput ? [frameOutput] : []}
+        outputs={SCAN_ENABLED && frameOutput ? [previewOutput, frameOutput] : [previewOutput]}
         constraints={[{ fps: TARGET_FPS }]}
       />
 
