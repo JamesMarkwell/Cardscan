@@ -13,6 +13,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput, usePreviewOutput } from 'react-native-vision-camera';
 import { GAMES, GameId } from '../data/types';
+import { decodeJpegToRgba } from '../scan/capture';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
@@ -51,6 +52,8 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   const previewOutput = usePreviewOutput();
   const photoOutput = usePhotoOutput({
     targetResolution: PHOTO_RESOLUTION,
+    // jpeg so we can decode the bytes ourselves with jpeg-js.
+    containerFormat: 'jpeg',
     qualityPrioritization: 'balanced',
     quality: 0.7,
   });
@@ -102,13 +105,21 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     setScanning(true);
     setStatus('Capturing…');
     try {
-      const file = await photoOutput.capturePhotoToFile({ enableShutterSound: false }, {});
+      const photo = await photoOutput.capturePhoto({ enableShutterSound: false }, {});
+      let outcome: { result: ScanResult | null; status: string };
+      try {
+        if (!mounted.current) return;
+        setStatus('Reading photo…');
+        const bytes = new Uint8Array(await photo.getFileDataAsync());
+        const frame = decodeJpegToRgba(bytes);
+        outcome = await service.scanImageOnce(frame, (stage) => {
+          if (mounted.current) setStatus(stage);
+        });
+      } finally {
+        photo.dispose();
+      }
       if (!mounted.current) return;
-
-      const { result, status: next } = await service.scanOnce(`file://${file.filePath}`, (stage) => {
-        if (mounted.current) setStatus(stage);
-      });
-      if (!mounted.current) return;
+      const { result, status: next } = outcome;
 
       if (result && result.printing) {
         void Haptics.notificationAsync(

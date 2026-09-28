@@ -31,6 +31,17 @@ export async function loadFrame(uri: string, width = WORKING_WIDTH): Promise<Rgb
   return { data: decoded.data, width: decoded.width, height: decoded.height };
 }
 
+/**
+ * Decode encoded JPEG bytes (e.g. straight from the camera's photo output) into
+ * an RGBA buffer. This avoids expo-image-manipulator entirely — its legacy
+ * `manipulateAsync` hangs on SDK 57 — so the live-capture path decodes the shot
+ * itself and hands the pixels to the pipeline (which does its own resizing).
+ */
+export function decodeJpegToRgba(bytes: Uint8Array): RgbaImage {
+  const decoded = decodeJpeg(bytes, { useTArray: true, formatAsRGBA: true });
+  return { data: decoded.data, width: decoded.width, height: decoded.height };
+}
+
 /** Write an RGBA crop out as a JPEG file, e.g. to hand to the OCR engine. */
 export async function cropToFile(uri: string, region: { left: number; top: number; width: number; height: number }, imageWidth: number, imageHeight: number): Promise<string> {
   const result = await manipulateAsync(

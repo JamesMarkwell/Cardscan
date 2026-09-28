@@ -113,12 +113,10 @@ export class ScanService {
    * the user framed the card and tapped, so one good frame is the whole scan.
    * A frame with no visible card still comes back with a reason to show.
    */
-  async scanOnce(
-    uri: string,
+  async scanImageOnce(
+    frame: import('./image').RgbaImage,
     onStage?: (stage: string) => void,
   ): Promise<{ result: ScanResult | null; status: string }> {
-    onStage?.('Reading photo…');
-    const frame = await loadFrame(uri);
     onStage?.('Detecting card…');
     const processed = await this.pipeline.processFrame(frame);
     if (processed.rejected) {
@@ -128,7 +126,7 @@ export class ScanService {
     onStage?.('Matching…');
     this.reset();
     this.frames.push(processed);
-    const result = await this.finish(uri);
+    const result = await this.finish(null);
     this.reset();
     return { result, status: 'done' };
   }
