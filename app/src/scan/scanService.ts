@@ -107,6 +107,26 @@ export class ScanService {
     return { result, status: 'done' };
   }
 
+  /**
+   * Identify a single, deliberately-captured photo (the manual shutter path).
+   * Unlike the live path there is no steadiness gate and no multi-frame vote:
+   * the user framed the card and tapped, so one good frame is the whole scan.
+   * A frame with no visible card still comes back with a reason to show.
+   */
+  async scanOnce(uri: string): Promise<{ result: ScanResult | null; status: string }> {
+    const frame = await loadFrame(uri);
+    const processed = await this.pipeline.processFrame(frame);
+    if (processed.rejected) {
+      return { result: null, status: processed.rejected };
+    }
+
+    this.reset();
+    this.frames.push(processed);
+    const result = await this.finish(uri);
+    this.reset();
+    return { result, status: 'done' };
+  }
+
   /** Resolve the frames gathered so far into a result. */
   async finish(photoUri: string | null): Promise<ScanResult> {
     const started = Date.now();

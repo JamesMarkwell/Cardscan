@@ -1,39 +1,36 @@
 /**
- * Camera screen: live auto-scan, no shutter button.
+ * Camera screen: live preview with a manual shutter.
  *
- * Uses react-native-vision-camera: the preview renders natively and frames are
- * delivered on the Camera's own worklet thread — never the JS/UI thread — so the
- * bottom tab bar and game chips stay responsive while scanning. Each delivered
- * frame is already RGB at a small target resolution (no JPEG decode), copied to
- * a compact RGBA buffer in the worklet and handed to JS via runOnJS, where the
- * existing pipeline identifies the card.
+ * Uses react-native-vision-camera. The preview renders natively and streams
+ * continuously (cheap, off the JS thread). Scanning is manual: the user frames a
+ * card and taps Scan, which captures one still and runs the identify pipeline on
+ * it. Continuous live scanning streamed every camera frame to the JS thread and
+ * froze the UI (the tab bar and chips live on that thread); a single capture on
+ * demand does the heavy work once, so the rest of the UI stays responsive.
  */
 import * as Haptics from 'expo-haptics';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import { Camera, useCameraDevice, useCameraPermission, useFrameOutput } from 'react-native-vision-camera';
-import { runOnJS } from 'react-native-worklets';
+import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput, usePreviewOutput } from 'react-native-vision-camera';
 import { GAMES, GameId } from '../data/types';
-import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
-// Frame delivery rate. Frames arrive on the Camera worklet thread, but each one
-// still schedules a little work on JS (the pipeline), so we cap the camera at a
-// modest rate rather than the full preview rate. Tunable.
-const TARGET_FPS = 8;
-// Small working frame: the detector wants 384 and the dewarped crop 448, so this
-// oversamples both while keeping the per-frame copy cheap.
-const TARGET_RESOLUTION = { width: 960, height: 540 };
+// Still-capture resolution. The pipeline downscales to its working width anyway,
+// so a modest photo keeps the capture and decode fast.
+const PHOTO_RESOLUTION = { width: 1280, height: 720 };
 
+// What each pipeline rejection reason means for the person holding the phone.
 const STATUS_TEXT: Record<string, string> = {
-  'no-card': 'Point at a card',
-  'bad-quad': 'Show all four corners',
-  'too-small': 'Move closer',
-  blurry: 'Hold still — focusing',
-  moving: 'Hold still',
-  steadying: 'Hold still',
+  'no-card': 'No card detected — line it up and tap Scan',
+  'bad-quad': 'Show all four corners, then tap Scan',
+  'too-small': 'Move closer, then tap Scan',
+  blurry: 'Hold steady — that shot was blurry',
+  moving: 'Hold steady and tap Scan',
+  steadying: 'Hold steady and tap Scan',
 };
+
+const IDLE_STATUS = 'Point at a card and tap Scan';
 
 interface Props {
   service: ScanService;
@@ -42,17 +39,25 @@ interface Props {
   onResult: (result: ScanResult) => void;
   indexReady: boolean;
   syncing?: boolean;
-  /** Stop scanning while something else is on top (e.g. the result sheet). */
+  /** Hide the shutter while something else is on top (e.g. the result sheet). */
   paused?: boolean;
 }
 
 export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady, syncing, paused }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
+  // The live preview only renders when a preview output is connected, and the
+  // photo output is what lets us capture a still to scan.
+  const previewOutput = usePreviewOutput();
+  const photoOutput = usePhotoOutput({
+    targetResolution: PHOTO_RESOLUTION,
+    qualityPrioritization: 'balanced',
+    quality: 0.7,
+  });
   const [status, setStatus] = useState('Starting camera');
   const [modelsReady, setModelsReady] = useState(false);
+  const [scanning, setScanning] = useState(false);
 
-  const busy = useRef(false);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -73,7 +78,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       .then(() => {
         if (!cancelled) {
           setModelsReady(true);
-          setStatus('Point at a card');
+          setStatus(IDLE_STATUS);
         }
       })
       .catch((error: Error) => {
@@ -84,75 +89,42 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     };
   }, [service]);
 
-  const active = modelsReady && hasPermission && !paused && !syncing;
+  // Scanning needs the models loaded and a settled catalogue.
+  const ready = modelsReady && hasPermission && !paused && !syncing;
+  // The Camera streams the preview whenever we have permission and no result
+  // sheet is up. The preview does not need the models or the catalogue, so it
+  // stays live during "Updating catalogue…" instead of showing black.
+  const cameraActive = hasPermission && !paused;
 
-  // Runs on the JS thread, one frame at a time. `busy` drops any frame that
-  // arrives while the previous one is still being identified.
-  const handleFrame = useCallback(
-    (data: Uint8Array, width: number, height: number) => {
-      if (!mounted.current || busy.current || !active) return;
-      busy.current = true;
-      const image: RgbaImage = { data, width, height };
-      service
-        .offerImage(image)
-        .then(({ result, status: next }) => {
-          if (!mounted.current) return;
-          if (result) {
-            void Haptics.notificationAsync(
-              result.confidence.tier === 'high'
-                ? Haptics.NotificationFeedbackType.Success
-                : Haptics.NotificationFeedbackType.Warning,
-            );
-            onResult(result);
-            setStatus('Point at a card');
-          } else {
-            setStatus(STATUS_TEXT[next] ?? next);
-          }
-        })
-        .catch((error: Error) => mounted.current && setStatus(error.message))
-        .finally(() => {
-          busy.current = false;
-        });
-    },
-    [active, onResult, service],
-  );
+  // Capture one still and identify it — the manual shutter.
+  const captureAndScan = async () => {
+    if (!ready || scanning) return;
+    setScanning(true);
+    setStatus('Scanning…');
+    try {
+      const file = await photoOutput.capturePhotoToFile({ enableShutterSound: false }, {});
+      if (!mounted.current) return;
 
-  const frameOutput = useFrameOutput({
-    pixelFormat: 'rgb',
-    targetResolution: TARGET_RESOLUTION,
-    // Hand us a display-upright buffer so the card is the right way up for the
-    // detector, regardless of sensor orientation.
-    enablePhysicalBufferRotation: true,
-    onFrame: (frame) => {
-      'worklet';
-      const plane = frame.getPlanes()[0];
-      if (plane == null) {
-        frame.dispose();
-        return;
+      const { result, status: next } = await service.scanOnce(`file://${file.filePath}`);
+      if (!mounted.current) return;
+
+      if (result) {
+        void Haptics.notificationAsync(
+          result.confidence.tier === 'high'
+            ? Haptics.NotificationFeedbackType.Success
+            : Haptics.NotificationFeedbackType.Warning,
+        );
+        onResult(result);
+        setStatus(IDLE_STATUS);
+      } else {
+        setStatus(STATUS_TEXT[next] ?? next);
       }
-      const width = plane.width;
-      const height = plane.height;
-      const bytesPerRow = plane.bytesPerRow;
-      const src = new Uint8Array(plane.getPixelBuffer());
-      // 'rgb' is 3 bytes/pixel, but some pipelines negotiate a 4-byte layout;
-      // derive it from the row stride and copy into compact RGBA.
-      const channels = Math.max(3, Math.round(bytesPerRow / width));
-      const out = new Uint8Array(width * height * 4);
-      for (let y = 0; y < height; y += 1) {
-        const row = y * bytesPerRow;
-        for (let x = 0; x < width; x += 1) {
-          const s = row + x * channels;
-          const d = (y * width + x) * 4;
-          out[d] = src[s];
-          out[d + 1] = src[s + 1];
-          out[d + 2] = src[s + 2];
-          out[d + 3] = 255;
-        }
-      }
-      frame.dispose();
-      runOnJS(handleFrame)(out, width, height);
-    },
-  });
+    } catch (error) {
+      if (mounted.current) setStatus((error as Error).message);
+    } finally {
+      if (mounted.current) setScanning(false);
+    }
+  };
 
   if (!hasPermission) {
     return (
@@ -180,9 +152,8 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       <Camera
         style={StyleSheet.absoluteFill}
         device={device}
-        isActive={active}
-        outputs={frameOutput ? [frameOutput] : []}
-        constraints={[{ fps: TARGET_FPS }]}
+        isActive={cameraActive}
+        outputs={[previewOutput, photoOutput]}
       />
 
       <View pointerEvents="none" style={styles.frameGuide} />
@@ -201,14 +172,30 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
         ))}
       </View>
 
-      <View style={styles.statusBar}>
-        {!modelsReady ? <ActivityIndicator color={theme.accent} /> : null}
-        <Text style={styles.statusText}>{status}</Text>
-        {syncing ? (
-          <Text style={styles.warning}>Updating catalogue…</Text>
-        ) : !indexReady ? (
-          <Text style={styles.warning}>No card index yet — it downloads on first sync.</Text>
-        ) : null}
+      <View style={styles.controls}>
+        <View style={styles.statusBar}>
+          {!modelsReady ? <ActivityIndicator color={theme.accent} /> : null}
+          <Text style={styles.statusText}>{status}</Text>
+          {syncing ? (
+            <Text style={styles.warning}>Updating catalogue…</Text>
+          ) : !indexReady ? (
+            <Text style={styles.warning}>No card index yet — it downloads on first sync.</Text>
+          ) : null}
+        </View>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Scan card"
+          disabled={!ready || scanning}
+          onPress={() => void captureAndScan()}
+          style={[styles.shutter, (!ready || scanning) && styles.shutterDisabled]}
+        >
+          {scanning ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.shutterText}>Scan</Text>
+          )}
+        </Pressable>
       </View>
     </View>
   );
@@ -238,7 +225,7 @@ const styles = StyleSheet.create({
     left: '10%',
     right: '10%',
     top: '18%',
-    bottom: '26%',
+    bottom: '30%',
     borderWidth: 2,
     borderColor: 'rgba(255,255,255,0.45)',
     borderRadius: 16,
@@ -265,17 +252,33 @@ const styles = StyleSheet.create({
   gameChipActive: { backgroundColor: theme.accent, borderColor: theme.accent },
   gameChipText: { color: theme.textMuted, fontSize: 12 },
   gameChipTextActive: { color: '#fff', fontWeight: '600' },
-  statusBar: {
+  controls: {
     position: 'absolute',
     bottom: theme.spacing(4),
     left: theme.spacing(2),
     right: theme.spacing(2),
+    alignItems: 'center',
+    gap: theme.spacing(1.5),
+  },
+  statusBar: {
+    alignSelf: 'stretch',
     alignItems: 'center',
     gap: theme.spacing(0.5),
     backgroundColor: 'rgba(11,14,20,0.8)',
     borderRadius: theme.radius,
     padding: theme.spacing(1.5),
   },
-  statusText: { color: theme.text, fontSize: 15 },
+  statusText: { color: theme.text, fontSize: 15, textAlign: 'center' },
   warning: { color: theme.check, fontSize: 12, textAlign: 'center' },
+  shutter: {
+    minWidth: 200,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.accent,
+    paddingHorizontal: theme.spacing(4),
+    paddingVertical: theme.spacing(2),
+    borderRadius: 999,
+  },
+  shutterDisabled: { opacity: 0.5 },
+  shutterText: { color: '#fff', fontSize: 17, fontWeight: '700' },
 });
