@@ -9,7 +9,7 @@
  * is ~40% cheaper than 720px) while still giving the 384px detector and the
  * dewarped 448px crop more than enough resolution.
  */
-import { SaveFormat, manipulateAsync } from 'expo-image-manipulator';
+import { ImageManipulator, SaveFormat, manipulateAsync } from 'expo-image-manipulator';
 import { decode as decodeJpeg } from 'jpeg-js';
 import { base64ToBytes } from './base64';
 import { RgbaImage } from './image';
@@ -17,28 +17,21 @@ import { RgbaImage } from './image';
 /** Working width. TCGplayer's own guidance is that resolution past ~100 DPI adds nothing. */
 export const WORKING_WIDTH = 540;
 
-/** Load a photo file as an RGBA buffer, downscaled to the working width. */
+/**
+ * Load a photo file as an RGBA buffer, downscaled to the working width.
+ *
+ * The resize happens natively (fast) so jpeg-js only ever decodes a small ~540px
+ * image; decoding a full-resolution capture in JS would take many seconds and
+ * appear to hang. Uses the modern ImageManipulator API — the legacy
+ * `manipulateAsync` never resolves on SDK 57.
+ */
 export async function loadFrame(uri: string, width = WORKING_WIDTH): Promise<RgbaImage> {
-  const resized = await manipulateAsync(uri, [{ resize: { width } }], {
-    base64: true,
-    compress: 0.92,
-    format: SaveFormat.JPEG,
-  });
+  const image = await ImageManipulator.manipulate(uri).resize({ width }).renderAsync();
+  const resized = await image.saveAsync({ base64: true, compress: 0.92, format: SaveFormat.JPEG });
 
   if (!resized.base64) throw new Error('Resize produced no image data');
 
   const decoded = decodeJpeg(base64ToBytes(resized.base64), { useTArray: true, formatAsRGBA: true });
-  return { data: decoded.data, width: decoded.width, height: decoded.height };
-}
-
-/**
- * Decode encoded JPEG bytes (e.g. straight from the camera's photo output) into
- * an RGBA buffer. This avoids expo-image-manipulator entirely — its legacy
- * `manipulateAsync` hangs on SDK 57 — so the live-capture path decodes the shot
- * itself and hands the pixels to the pipeline (which does its own resizing).
- */
-export function decodeJpegToRgba(bytes: Uint8Array): RgbaImage {
-  const decoded = decodeJpeg(bytes, { useTArray: true, formatAsRGBA: true });
   return { data: decoded.data, width: decoded.width, height: decoded.height };
 }
 

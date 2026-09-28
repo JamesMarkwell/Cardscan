@@ -13,7 +13,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput, usePreviewOutput } from 'react-native-vision-camera';
 import { GAMES, GameId } from '../data/types';
-import { decodeJpegToRgba } from '../scan/capture';
+import { loadFrame } from '../scan/capture';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
@@ -105,21 +105,16 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     setScanning(true);
     setStatus('Capturing…');
     try {
-      const photo = await photoOutput.capturePhoto({ enableShutterSound: false }, {});
-      let outcome: { result: ScanResult | null; status: string };
-      try {
-        if (!mounted.current) return;
-        setStatus('Reading photo…');
-        const bytes = new Uint8Array(await photo.getFileDataAsync());
-        const frame = decodeJpegToRgba(bytes);
-        outcome = await service.scanImageOnce(frame, (stage) => {
-          if (mounted.current) setStatus(stage);
-        });
-      } finally {
-        photo.dispose();
-      }
+      const file = await photoOutput.capturePhotoToFile({ enableShutterSound: false }, {});
       if (!mounted.current) return;
-      const { result, status: next } = outcome;
+
+      setStatus('Reading photo…');
+      // Resize natively to the working width, then identify the decoded frame.
+      const frame = await loadFrame(`file://${file.filePath}`);
+      const { result, status: next } = await service.scanImageOnce(frame, (stage) => {
+        if (mounted.current) setStatus(stage);
+      });
+      if (!mounted.current) return;
 
       if (result && result.printing) {
         void Haptics.notificationAsync(
