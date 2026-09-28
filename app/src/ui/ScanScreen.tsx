@@ -2,33 +2,36 @@
  * Camera screen: live auto-scan, no shutter button.
  *
  * Uses react-native-vision-camera: the preview renders natively and frames are
- * delivered on the Camera's own worklet thread. The worklet copies each frame
- * into a compact RGBA buffer and hands it to JS, where the pipeline identifies
- * the card. That marshalling and identification both land on the JS thread —
- * the same thread React Native uses to dispatch touches — so the frame rate is
- * kept low and each pipeline pass is gated behind an idle window, leaving the
- * bottom tab bar and game chips responsive while scanning.
+ * delivered on the Camera's own worklet thread. Marshalling a frame to JS and
+ * identifying it both land on the JS thread — the same thread React Native uses
+ * to dispatch touches — so two throttles keep that thread free enough for the
+ * tab bar and game chips: the worklet forwards only ~1 frame in FORWARD_EVERY to
+ * JS (the sensor's raw rate would flood it), and each identify pass is gated
+ * behind an idle window plus InteractionManager. The live preview streams
+ * whenever we have permission — it does not wait on the models or the catalogue.
  */
 import * as Haptics from 'expo-haptics';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, useFrameOutput, usePreviewOutput } from 'react-native-vision-camera';
-import { runOnJS } from 'react-native-worklets';
+import { createSynchronizable, runOnJS } from 'react-native-worklets';
 import { GAMES, GameId } from '../data/types';
 import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
-// Frame delivery rate. Every delivered frame is marshalled from the Camera
-// worklet thread to the JS thread (a whole RGBA buffer) and then identified on
-// the JS thread — the same thread React Native dispatches touches on. So the
-// rate is what governs how much of that thread scanning consumes. A low rate
-// still identifies cards quickly (the capture gate only needs 3 steady frames,
-// ~1s at 4fps) while leaving the JS thread mostly free for the tab bar and chips.
-const TARGET_FPS = 4;
+// Forward only every Nth camera frame from the worklet thread to JS. The camera
+// delivers frames at the sensor rate — an { fps } constraint is only a hint the
+// sensor rounds to its nearest supported range (often 15–30fps), NOT a hard cap —
+// and every forwarded frame marshals a whole RGBA buffer onto the JS thread, the
+// same thread React Native dispatches touches on. Left unthrottled that marshal
+// alone floods the JS thread and freezes the tab bar and chips, before any
+// identification even runs. Dropping frames in the worklet (off the JS thread) is
+// free, so we forward ~1 in 8 — roughly 2–4fps, plenty for the capture gate.
+const FORWARD_EVERY = 8;
 // Working frame. The detector squashes to 384 and the dewarped crop is 448, so
 // this still oversamples both — while keeping the buffer marshalled to JS each
-// frame small (640x360x4 ≈ 0.9MB vs 2MB at 960x540), which is pure JS-thread cost.
+// forwarded frame small (640x360x4 ≈ 0.9MB vs 2MB at 960x540), pure JS-thread cost.
 const TARGET_RESOLUTION = { width: 640, height: 360 };
 // Minimum idle window between pipeline passes. Each pass blocks the JS thread in
 // bursts (tensor packing, the blur check, the index search); without a gap the
@@ -36,15 +39,6 @@ const TARGET_RESOLUTION = { width: 640, height: 360 };
 // After the gap we also wait for InteractionManager, so a tab-bar tap always
 // wins the thread first and the next frame runs only once the UI is idle again.
 const FRAME_GAP_MS = 150;
-
-// TEMPORARY DIAGNOSTIC. The UI freezes the instant the camera turns on — before
-// any frame is identified — which rules out the identify pipeline. This isolates
-// the two remaining suspects: the vision-camera live preview itself, versus the
-// per-frame delivery of buffers to the JS thread. With this false, a real live
-// preview renders (via the preview output) but NO frames are delivered to JS and
-// NO scanning runs — so if the tab bar is responsive the cause is frame delivery,
-// and if it still freezes it is the preview. Flip back to true once we know which.
-const SCAN_ENABLED = false;
 
 const STATUS_TEXT: Record<string, string> = {
   'no-card': 'Point at a card',
@@ -74,6 +68,10 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   const previewOutput = usePreviewOutput();
   const [status, setStatus] = useState('Starting camera');
   const [modelsReady, setModelsReady] = useState(false);
+
+  // A frame counter shared with the worklet thread, so the worklet can forward
+  // only every Nth frame to JS and dispose the rest without ever touching JS.
+  const frameCounter = useMemo(() => createSynchronizable(0), []);
 
   // The newest frame the worklet has handed us, waiting to be processed. Frames
   // arrive faster than the pipeline runs, so we only ever keep the latest one
@@ -111,12 +109,14 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     };
   }, [service]);
 
+  // Scanning needs the models loaded and a settled catalogue. The scheduler
+  // below only identifies frames while this is true.
   const active = modelsReady && hasPermission && !paused && !syncing;
-  // Whether the Camera itself streams a preview. Scanning needs the models and a
-  // settled catalogue, but the preview does not — so in the diagnostic we turn
-  // the camera on as soon as we have permission, ignoring the sync gate that was
-  // keeping it black. (With scanning on, camera activity follows `active`.)
-  const cameraActive = SCAN_ENABLED ? active : hasPermission;
+  // The Camera streams (preview + frames) whenever we have permission and no
+  // result sheet is up. The preview does NOT need the models or the catalogue,
+  // so it stays live during "Updating catalogue…" instead of showing black; the
+  // heavy identification still waits for `active`.
+  const cameraActive = hasPermission && !paused;
 
   // Runs on the JS thread for every delivered frame, but does almost nothing:
   // it just stashes the latest frame. The heavy identification is driven
@@ -129,7 +129,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   // idle gap and once InteractionManager reports the UI is idle, so taps on the
   // tab bar and game chips are always serviced before the next pipeline pass.
   useEffect(() => {
-    if (!active || !SCAN_ENABLED) return undefined;
+    if (!active) return undefined;
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -187,6 +187,15 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     enablePhysicalBufferRotation: true,
     onFrame: (frame) => {
       'worklet';
+      // Throttle on the worklet thread: forward ~1 frame in FORWARD_EVERY to JS
+      // and dispose the rest here, so the JS thread is never flooded with buffer
+      // marshalling at the sensor's frame rate. Dropping frames here is free.
+      const n = frameCounter.getDirty() + 1;
+      frameCounter.setBlocking(n);
+      if (n % FORWARD_EVERY !== 0) {
+        frame.dispose();
+        return;
+      }
       const plane = frame.getPlanes()[0];
       if (plane == null) {
         frame.dispose();
@@ -243,8 +252,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
         style={StyleSheet.absoluteFill}
         device={device}
         isActive={cameraActive}
-        outputs={SCAN_ENABLED && frameOutput ? [previewOutput, frameOutput] : [previewOutput]}
-        constraints={[{ fps: TARGET_FPS }]}
+        outputs={frameOutput ? [previewOutput, frameOutput] : [previewOutput]}
       />
 
       <View pointerEvents="none" style={styles.frameGuide} />
@@ -265,7 +273,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
 
       <View style={styles.statusBar}>
         {!modelsReady ? <ActivityIndicator color={theme.accent} /> : null}
-        <Text style={styles.statusText}>{SCAN_ENABLED ? status : 'Diagnostic build: preview only (scanning off)'}</Text>
+        <Text style={styles.statusText}>{status}</Text>
         {syncing ? (
           <Text style={styles.warning}>Updating catalogue…</Text>
         ) : !indexReady ? (
