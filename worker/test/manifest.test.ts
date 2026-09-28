@@ -109,6 +109,36 @@ describe('manifest', () => {
     expect(after.games[0].indexIdsUrl).toMatch(new RegExp(`/packs/games/onepiece/index-${version}\\.ids$`));
   });
 
+  it('serves the latest available index for a newer version that has none of its own', async () => {
+    stubFetch();
+    await runRefresh(env, ['onepiece']);
+
+    const first = await manifest();
+    const oldVersion = first.games[0].version;
+    // The fingerprint job attaches an index to this version.
+    await db
+      .prepare('UPDATE catalog_versions SET index_pack_key = ? WHERE game_id = ? AND version = ?')
+      .bind(`games/onepiece/index-${oldVersion}.bin`, 'onepiece', oldVersion)
+      .run();
+
+    // A later nightly catalog refresh publishes a newer version that has no
+    // index of its own yet (nothing new needed embedding, or it hasn't run).
+    const newerVersion = '29991231';
+    await db
+      .prepare(
+        'INSERT INTO catalog_versions (game_id, version, created_at, printings_count, index_pack_key) VALUES (?, ?, ?, ?, NULL)',
+      )
+      .bind('onepiece', newerVersion, new Date(Date.now() + 60_000).toISOString(), 5)
+      .run();
+
+    const body = await manifest();
+    // The manifest serves the newest version, but with the older index — its
+    // embeddings still cover every existing card — rather than no index at all.
+    expect(body.games[0].version).toBe(newerVersion);
+    expect(body.games[0].indexUrl).toMatch(new RegExp(`/packs/games/onepiece/index-${oldVersion}\\.bin$`));
+    expect(body.games[0].indexIdsUrl).toMatch(new RegExp(`/packs/games/onepiece/index-${oldVersion}\\.ids$`));
+  });
+
   it('points at a catalog pack that is actually there', async () => {
     stubFetch();
     await runRefresh(env, ['onepiece']);

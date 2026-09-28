@@ -62,12 +62,22 @@ app.get('/manifest.json', async (c) => {
 
   const byGame = new Map<string, any>();
   const history = new Map<string, string[]>();
+  // The most recent index pack key per game, regardless of which version it was
+  // attached to. The nightly catalog refresh creates a new version most days,
+  // but the fingerprint job only attaches an index to versions that had new
+  // cards to embed — so the newest version's own key is often null. The pack's
+  // embeddings are valid for every existing card, so fall back to the latest
+  // one that exists rather than telling the app there is no index at all.
+  const latestIndexKey = new Map<string, string>();
 
   for (const row of rows.results as any[]) {
     if (!byGame.has(row.gameId)) byGame.set(row.gameId, row);
     const versions = history.get(row.gameId) ?? [];
     versions.push(row.version);
     history.set(row.gameId, versions);
+    if (row.indexPackKey && !latestIndexKey.has(row.gameId)) {
+      latestIndexKey.set(row.gameId, row.indexPackKey as string);
+    }
   }
 
   const origin = new URL(c.req.url).origin;
@@ -84,9 +94,11 @@ app.get('/manifest.json', async (c) => {
       }));
 
       // The index pack is published by the fingerprint job, separately and
-      // later than the catalog. Advertise its URLs only once that key exists, so
-      // the app doesn't try to download a 404 and fail an otherwise good sync.
-      const indexKey = row.indexPackKey as string | null;
+      // later than the catalog. Prefer this version's own key, but fall back to
+      // the most recent index this game has ever published — its embeddings
+      // cover every existing card, so a newer catalog version with no index of
+      // its own should still serve one rather than none.
+      const indexKey = (row.indexPackKey as string | null) ?? latestIndexKey.get(row.gameId) ?? null;
 
       return {
         game: row.gameId as GameId,
