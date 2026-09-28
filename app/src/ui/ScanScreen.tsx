@@ -1,44 +1,31 @@
 /**
  * Camera screen: live auto-scan, no shutter button.
  *
- * Uses react-native-vision-camera: the preview renders natively and frames are
- * delivered on the Camera's own worklet thread. Marshalling a frame to JS and
- * identifying it both land on the JS thread — the same thread React Native uses
- * to dispatch touches — so two throttles keep that thread free enough for the
- * tab bar and game chips: the worklet forwards only ~1 frame in FORWARD_EVERY to
- * JS (the sensor's raw rate would flood it), and each identify pass is gated
- * behind an idle window plus InteractionManager. The live preview streams
- * whenever we have permission — it does not wait on the models or the catalogue.
+ * Uses react-native-vision-camera. The preview renders natively and streams
+ * continuously (that is cheap and never touches the JS thread). Scanning is done
+ * by capturing one still photo per cycle and running the existing pipeline on it,
+ * rather than streaming every camera frame to the JS thread — a continuous frame
+ * stream floods the JS thread (each frame marshals a whole buffer across the
+ * thread boundary) and freezes the tab bar and game chips, which sit on that same
+ * thread. One capture every ~second leaves the thread free between scans, and each
+ * capture+identify pass is gated behind an idle window so taps always win first.
  */
 import * as Haptics from 'expo-haptics';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, InteractionManager, Pressable, StyleSheet, Text, View } from 'react-native';
-import { Camera, useCameraDevice, useCameraPermission, useFrameOutput, usePreviewOutput } from 'react-native-vision-camera';
-import { createSynchronizable, runOnJS } from 'react-native-worklets';
+import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput, usePreviewOutput } from 'react-native-vision-camera';
 import { GAMES, GameId } from '../data/types';
-import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
-// Forward only every Nth camera frame from the worklet thread to JS. The camera
-// delivers frames at the sensor rate — an { fps } constraint is only a hint the
-// sensor rounds to its nearest supported range (often 15–30fps), NOT a hard cap —
-// and every forwarded frame marshals a whole RGBA buffer onto the JS thread, the
-// same thread React Native dispatches touches on. Left unthrottled that marshal
-// alone floods the JS thread and freezes the tab bar and chips, before any
-// identification even runs. Dropping frames in the worklet (off the JS thread) is
-// free, so we forward ~1 in 8 — roughly 2–4fps, plenty for the capture gate.
-const FORWARD_EVERY = 8;
-// Working frame. The detector squashes to 384 and the dewarped crop is 448, so
-// this still oversamples both — while keeping the buffer marshalled to JS each
-// forwarded frame small (640x360x4 ≈ 0.9MB vs 2MB at 960x540), pure JS-thread cost.
-const TARGET_RESOLUTION = { width: 640, height: 360 };
-// Minimum idle window between pipeline passes. Each pass blocks the JS thread in
-// bursts (tensor packing, the blur check, the index search); without a gap the
-// next frame starts the moment one finishes and touches never get the thread.
-// After the gap we also wait for InteractionManager, so a tab-bar tap always
-// wins the thread first and the next frame runs only once the UI is idle again.
-const FRAME_GAP_MS = 150;
+// Idle gap between scan captures. A capture + identify pass briefly uses the JS
+// thread (the JPEG decode and the pipeline); the gap, plus InteractionManager,
+// guarantees the tab bar and chips get the thread between passes. The capture
+// gate needs 3 steady frames to lock, so this barely changes time-to-scan.
+const CAPTURE_GAP_MS = 700;
+// Still-capture resolution. The pipeline downscales to its working width anyway,
+// so a modest photo keeps the capture and decode fast.
+const PHOTO_RESOLUTION = { width: 1280, height: 720 };
 
 const STATUS_TEXT: Record<string, string> = {
   'no-card': 'Point at a card',
@@ -63,21 +50,17 @@ interface Props {
 export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady, syncing, paused }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
-  // The live preview only renders when a preview output is connected — the
-  // migration was missing this, so the Camera showed nothing on its own.
+  // The live preview only renders when a preview output is connected, and the
+  // photo output is what lets us capture stills to scan.
   const previewOutput = usePreviewOutput();
+  const photoOutput = usePhotoOutput({
+    targetResolution: PHOTO_RESOLUTION,
+    qualityPrioritization: 'balanced',
+    quality: 0.7,
+  });
   const [status, setStatus] = useState('Starting camera');
   const [modelsReady, setModelsReady] = useState(false);
 
-  // A frame counter shared with the worklet thread, so the worklet can forward
-  // only every Nth frame to JS and dispose the rest without ever touching JS.
-  const frameCounter = useMemo(() => createSynchronizable(0), []);
-
-  // The newest frame the worklet has handed us, waiting to be processed. Frames
-  // arrive faster than the pipeline runs, so we only ever keep the latest one
-  // and drop the rest — a stale frame is worthless for a live scan anyway.
-  const pendingFrame = useRef<RgbaImage | null>(null);
-  const processing = useRef(false);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -109,25 +92,16 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     };
   }, [service]);
 
-  // Scanning needs the models loaded and a settled catalogue. The scheduler
-  // below only identifies frames while this is true.
+  // Scanning needs the models loaded and a settled catalogue.
   const active = modelsReady && hasPermission && !paused && !syncing;
-  // The Camera streams (preview + frames) whenever we have permission and no
-  // result sheet is up. The preview does NOT need the models or the catalogue,
-  // so it stays live during "Updating catalogue…" instead of showing black; the
-  // heavy identification still waits for `active`.
+  // The Camera streams the preview whenever we have permission and no result
+  // sheet is up. The preview does not need the models or the catalogue, so it
+  // stays live during "Updating catalogue…" instead of showing black.
   const cameraActive = hasPermission && !paused;
 
-  // Runs on the JS thread for every delivered frame, but does almost nothing:
-  // it just stashes the latest frame. The heavy identification is driven
-  // separately (below) so it can be throttled and yielded around touches.
-  const handleFrame = useCallback((data: Uint8Array, width: number, height: number) => {
-    if (mounted.current) pendingFrame.current = { data, width, height };
-  }, []);
-
-  // Identify the latest stashed frame, then reschedule — but only after a short
-  // idle gap and once InteractionManager reports the UI is idle, so taps on the
-  // tab bar and game chips are always serviced before the next pipeline pass.
+  // Capture one still, identify it, then reschedule — but only after an idle gap
+  // and once InteractionManager reports the UI is idle, so taps on the tab bar
+  // and game chips are always serviced before the next capture.
   useEffect(() => {
     if (!active) return undefined;
 
@@ -135,40 +109,38 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     let timer: ReturnType<typeof setTimeout>;
     let interaction: ReturnType<typeof InteractionManager.runAfterInteractions> | undefined;
 
+    const scan = async () => {
+      try {
+        const file = await photoOutput.capturePhotoToFile({ enableShutterSound: false }, {});
+        if (cancelled || !mounted.current) return;
+
+        const { result, status: next } = await service.offerPhoto(`file://${file.filePath}`);
+        if (cancelled || !mounted.current) return;
+
+        if (result) {
+          void Haptics.notificationAsync(
+            result.confidence.tier === 'high'
+              ? Haptics.NotificationFeedbackType.Success
+              : Haptics.NotificationFeedbackType.Warning,
+          );
+          onResult(result);
+          setStatus('Point at a card');
+        } else {
+          setStatus(STATUS_TEXT[next] ?? next);
+        }
+      } catch (error) {
+        if (!cancelled && mounted.current) setStatus((error as Error).message);
+      } finally {
+        if (!cancelled) schedule();
+      }
+    };
+
     const schedule = () => {
       timer = setTimeout(() => {
-        interaction = InteractionManager.runAfterInteractions(async () => {
-          if (cancelled) return;
-          const frame = pendingFrame.current;
-          pendingFrame.current = null;
-
-          if (frame && !processing.current) {
-            processing.current = true;
-            try {
-              const { result, status: next } = await service.offerImage(frame);
-              if (!cancelled && mounted.current) {
-                if (result) {
-                  void Haptics.notificationAsync(
-                    result.confidence.tier === 'high'
-                      ? Haptics.NotificationFeedbackType.Success
-                      : Haptics.NotificationFeedbackType.Warning,
-                  );
-                  onResult(result);
-                  setStatus('Point at a card');
-                } else {
-                  setStatus(STATUS_TEXT[next] ?? next);
-                }
-              }
-            } catch (error) {
-              if (!cancelled && mounted.current) setStatus((error as Error).message);
-            } finally {
-              processing.current = false;
-            }
-          }
-
-          if (!cancelled) schedule();
+        interaction = InteractionManager.runAfterInteractions(() => {
+          if (!cancelled) void scan();
         });
-      }, FRAME_GAP_MS);
+      }, CAPTURE_GAP_MS);
     };
 
     schedule();
@@ -177,53 +149,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       clearTimeout(timer);
       interaction?.cancel();
     };
-  }, [active, onResult, service]);
-
-  const frameOutput = useFrameOutput({
-    pixelFormat: 'rgb',
-    targetResolution: TARGET_RESOLUTION,
-    // Hand us a display-upright buffer so the card is the right way up for the
-    // detector, regardless of sensor orientation.
-    enablePhysicalBufferRotation: true,
-    onFrame: (frame) => {
-      'worklet';
-      // Throttle on the worklet thread: forward ~1 frame in FORWARD_EVERY to JS
-      // and dispose the rest here, so the JS thread is never flooded with buffer
-      // marshalling at the sensor's frame rate. Dropping frames here is free.
-      const n = frameCounter.getDirty() + 1;
-      frameCounter.setBlocking(n);
-      if (n % FORWARD_EVERY !== 0) {
-        frame.dispose();
-        return;
-      }
-      const plane = frame.getPlanes()[0];
-      if (plane == null) {
-        frame.dispose();
-        return;
-      }
-      const width = plane.width;
-      const height = plane.height;
-      const bytesPerRow = plane.bytesPerRow;
-      const src = new Uint8Array(plane.getPixelBuffer());
-      // 'rgb' is 3 bytes/pixel, but some pipelines negotiate a 4-byte layout;
-      // derive it from the row stride and copy into compact RGBA.
-      const channels = Math.max(3, Math.round(bytesPerRow / width));
-      const out = new Uint8Array(width * height * 4);
-      for (let y = 0; y < height; y += 1) {
-        const row = y * bytesPerRow;
-        for (let x = 0; x < width; x += 1) {
-          const s = row + x * channels;
-          const d = (y * width + x) * 4;
-          out[d] = src[s];
-          out[d + 1] = src[s + 1];
-          out[d + 2] = src[s + 2];
-          out[d + 3] = 255;
-        }
-      }
-      frame.dispose();
-      runOnJS(handleFrame)(out, width, height);
-    },
-  });
+  }, [active, photoOutput, onResult, service]);
 
   if (!hasPermission) {
     return (
@@ -252,7 +178,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
         style={StyleSheet.absoluteFill}
         device={device}
         isActive={cameraActive}
-        outputs={frameOutput ? [previewOutput, frameOutput] : [previewOutput]}
+        outputs={[previewOutput, photoOutput]}
       />
 
       <View pointerEvents="none" style={styles.frameGuide} />
