@@ -13,7 +13,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput, usePreviewOutput } from 'react-native-vision-camera';
 import { GAMES, GameId } from '../data/types';
-import { loadFrame } from '../scan/capture';
+import { imageToRgba } from '../scan/capture';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
@@ -105,12 +105,15 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     setScanning(true);
     setStatus('Capturing…');
     try {
-      const file = await photoOutput.capturePhotoToFile({ enableShutterSound: false }, {});
+      const photo = await photoOutput.capturePhoto({ enableShutterSound: false }, {});
       if (!mounted.current) return;
 
       setStatus('Reading photo…');
-      // Resize natively to the working width, then identify the decoded frame.
-      const frame = await loadFrame(`file://${file.filePath}`);
+      // Decode + downscale entirely natively (no JPEG decode on the JS thread),
+      // then identify the small RGBA frame.
+      const image = await photo.toImageAsync();
+      photo.dispose();
+      const frame = await imageToRgba(image);
       const { result, status: next } = await service.scanImageOnce(frame, (stage) => {
         if (mounted.current) setStatus(stage);
       });
