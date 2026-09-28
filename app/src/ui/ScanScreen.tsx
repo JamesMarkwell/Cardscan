@@ -100,15 +100,17 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   const captureAndScan = async () => {
     if (!ready || scanning) return;
     setScanning(true);
-    setStatus('Scanning…');
+    setStatus('Capturing…');
     try {
       const file = await photoOutput.capturePhotoToFile({ enableShutterSound: false }, {});
       if (!mounted.current) return;
 
-      const { result, status: next } = await service.scanOnce(`file://${file.filePath}`);
+      const { result, status: next } = await service.scanOnce(`file://${file.filePath}`, (stage) => {
+        if (mounted.current) setStatus(stage);
+      });
       if (!mounted.current) return;
 
-      if (result) {
+      if (result && result.printing) {
         void Haptics.notificationAsync(
           result.confidence.tier === 'high'
             ? Haptics.NotificationFeedbackType.Success
@@ -116,11 +118,14 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
         );
         onResult(result);
         setStatus(IDLE_STATUS);
+      } else if (result) {
+        // The pipeline ran but matched nothing confidently.
+        setStatus('No match — try again, filling the frame');
       } else {
         setStatus(STATUS_TEXT[next] ?? next);
       }
     } catch (error) {
-      if (mounted.current) setStatus((error as Error).message);
+      if (mounted.current) setStatus(`Scan error: ${(error as Error).message}`);
     } finally {
       if (mounted.current) setScanning(false);
     }
