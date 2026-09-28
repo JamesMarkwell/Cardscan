@@ -19,6 +19,12 @@ export function indexFiles(gameId: string, version: string): { pack: File; ids: 
   };
 }
 
+/** Whether both files of a game's index pack are already on the device. */
+export function indexPackExists(gameId: string, version: string): boolean {
+  const { pack, ids } = indexFiles(gameId, version);
+  return pack.exists && ids.exists;
+}
+
 export async function loadIndexPack(gameId: string, version: string): Promise<IndexPack | null> {
   const { pack, ids } = indexFiles(gameId, version);
   if (!pack.exists || !ids.exists) return null;
