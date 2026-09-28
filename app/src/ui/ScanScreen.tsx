@@ -33,6 +33,17 @@ const STATUS_TEXT: Record<string, string> = {
 
 const IDLE_STATUS = 'Point at a card and tap Scan';
 
+/** Reject if a promise has not settled within `ms`, so a stuck native call
+ * surfaces as a readable error instead of an endless spinner. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+    }),
+  ]);
+}
+
 interface Props {
   service: ScanService;
   gameId: GameId;
@@ -108,12 +119,20 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       const photo = await photoOutput.capturePhoto({ enableShutterSound: false }, {});
       if (!mounted.current) return;
 
+      // Decode the JPEG to a native Image. This is the one unavoidable async
+      // native op; time it out so a stall surfaces as a readable error rather
+      // than an endless spinner (and tells us this is the step that hangs).
       setStatus('Reading photo…');
-      // Decode + downscale entirely natively (no JPEG decode on the JS thread),
-      // then identify the small RGBA frame.
-      const image = await photo.toImageAsync();
+      const image = await withTimeout(photo.toImageAsync(), 15000, 'decode');
+      if (!mounted.current) {
+        photo.dispose();
+        return;
+      }
+      // The rest is synchronous native work (resize + read pixels) plus a small
+      // RGBA repack — no promises to hang on.
+      const frame = imageToRgba(image);
       photo.dispose();
-      const frame = await imageToRgba(image);
+
       const { result, status: next } = await service.scanImageOnce(frame, (stage) => {
         if (mounted.current) setStatus(stage);
       });

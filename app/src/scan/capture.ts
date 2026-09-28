@@ -42,10 +42,12 @@ const CHANNEL_ORDER: Record<string, { r: number; g: number; b: number; n: number
  * app). The only JS work is repacking the small buffer into RGBA, honouring
  * whatever native pixel order the platform reports.
  */
-export async function imageToRgba(image: Image, width = WORKING_WIDTH): Promise<RgbaImage> {
+export function imageToRgba(image: Image, width = WORKING_WIDTH): RgbaImage {
   const height = image.width > 0 ? Math.max(1, Math.round(width * (image.height / image.width))) : width;
-  const small = await image.resizeAsync(width, height);
-  const raw = await small.toRawPixelDataAsync();
+  // Synchronous native ops: an async native image promise was never resolving on
+  // this build, so avoid awaiting one here. Resizing first keeps this cheap.
+  const small = image.resize(width, height);
+  const raw = small.toRawPixelData();
 
   const src = new Uint8Array(raw.buffer);
   const w = raw.width;
