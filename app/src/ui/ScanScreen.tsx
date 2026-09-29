@@ -74,9 +74,21 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   // against a stray frame being processed and against double-taps.
   const awaitingCapture = useRef(false);
   const watchdog = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Cross-runtime flag the worklet reads each frame: set true on tap, the
-  // worklet clears it as soon as it grabs the next frame.
+  // Set true once the worklet has ever run, so a capture timeout can tell "the
+  // camera isn't delivering frames at all" apart from "frames flow but the grab
+  // didn't complete".
+  const cameraStreaming = useRef(false);
+  const onStreaming = useCallback(() => {
+    cameraStreaming.current = true;
+  }, []);
+  // Cross-runtime flags the worklet reads each frame. Read them with
+  // getBlocking() (a synchronised read): getDirty() is a fast, possibly-stale
+  // read that can miss the write the JS thread just made, so the worklet would
+  // never see the capture request. Set true on tap; the worklet clears it as
+  // soon as it grabs the next frame.
   const captureRequest = useMemo(() => createSynchronizable(false), []);
+  // One-shot: flipped true by the worklet on its first-ever frame.
+  const streamSignaled = useMemo(() => createSynchronizable(false), []);
 
   useEffect(() => {
     mounted.current = true;
@@ -162,9 +174,14 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     enablePhysicalBufferRotation: true,
     onFrame: (frame) => {
       'worklet';
+      // Signal, exactly once, that frames are actually being delivered.
+      if (!streamSignaled.getBlocking()) {
+        streamSignaled.setBlocking(true);
+        runOnJS(onStreaming)();
+      }
       // Do nothing — and cost the JS thread nothing — until a capture is asked
       // for. This is what keeps the UI responsive while the preview streams.
-      if (!captureRequest.getDirty()) {
+      if (!captureRequest.getBlocking()) {
         frame.dispose();
         return;
       }
@@ -211,7 +228,11 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       captureRequest.setBlocking(false);
       if (mounted.current) {
         setScanning(false);
-        setStatus('Camera didn’t deliver a frame — try again');
+        setStatus(
+          cameraStreaming.current
+            ? 'Couldn’t grab a frame — try again'
+            : 'Camera isn’t delivering frames — try again',
+        );
       }
     }, CAPTURE_TIMEOUT_MS);
   };
