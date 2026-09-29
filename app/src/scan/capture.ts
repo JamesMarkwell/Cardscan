@@ -17,18 +17,29 @@ import { ImageManipulator, SaveFormat, manipulateAsync } from 'expo-image-manipu
 import { decode as decodeJpeg } from 'jpeg-js';
 import { base64ToBytes } from './base64';
 import { RgbaImage } from './image';
+import { MAX_DECODE_PIXELS, readJpegDimensions } from './jpegHeader';
 
 /** Working width. TCGplayer's own guidance is that resolution past ~100 DPI adds nothing. */
 export const WORKING_WIDTH = 540;
 
+// Re-export so callers can read the capture size without reaching past capture.
+export { readJpegDimensions } from './jpegHeader';
+
 /**
  * Decode encoded JPEG bytes (straight from the camera's photo output) into an
  * RGBA buffer, downscaled to the working width. Pure JS — no native image
- * library, which is the whole point: those hang on this build. The memory guards
- * make an unexpectedly large image throw (caught upstream as a readable "Scan
- * error") instead of OOM-crashing the app.
+ * library, which is the whole point: those hang on this build. Rejects an
+ * over-large image up front (see {@link MAX_DECODE_PIXELS}) so a capture the
+ * camera refused to shrink surfaces as a readable "Scan error" naming the size,
+ * rather than freezing the JS thread for tens of seconds.
  */
 export function decodeJpegToRgba(bytes: Uint8Array, width = WORKING_WIDTH): RgbaImage {
+  const dims = readJpegDimensions(bytes);
+  if (dims && dims.width * dims.height > MAX_DECODE_PIXELS) {
+    throw new Error(
+      `photo too large to decode (${dims.width}×${dims.height}); the camera ignored the resolution request`,
+    );
+  }
   const decoded = decodeJpeg(bytes, {
     useTArray: true,
     formatAsRGBA: true,

@@ -19,18 +19,17 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput, usePreviewOutput } from 'react-native-vision-camera';
 import { GAMES, GameId } from '../data/types';
-import { decodeJpegToRgba } from '../scan/capture';
+import { decodeJpegToRgba, readJpegDimensions } from '../scan/capture';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
 // Still-capture resolution. We decode the JPEG in pure JS (jpeg-js), whose cost
-// and memory scale with pixel count, and the pipeline downscales to its working
-// width (540px) anyway — so we ask for a deliberately small capture. This build
-// negotiates `targetResolution` at the camera-session level (there is no classic
-// `format` selector in the Nitro API), and it prioritises the requested aspect
-// ratio over exact pixel count, so a modest 4:3 target keeps the photo — and
-// therefore the JS decode — small and well clear of any memory ceiling.
-const PHOTO_RESOLUTION = { width: 1024, height: 768 };
+// scales with pixel count, and the pipeline downscales to its working width
+// (540px) anyway — so we ask for a deliberately small capture. 1280x720 is a
+// resolution essentially every Android camera supports natively, so the session
+// is far more likely to honour it than an off-standard size (which it rounds up
+// to full sensor resolution — the very thing that made the JS decode grind).
+const PHOTO_RESOLUTION = { width: 1280, height: 720 };
 
 // What each pipeline rejection reason means for the person holding the phone.
 const STATUS_TEXT: Record<string, string> = {
@@ -144,12 +143,16 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
 
       // Decode in pure JS — the one decode path that doesn't hang on this build.
       // Synchronous, so it briefly holds the JS thread; fine for a manual shutter.
-      // Yield first so "Decoding…" actually paints before the decode seizes the
-      // thread — otherwise a slow/failed decode would still read "Reading photo…"
-      // and we'd blame the wrong step.
-      setStatus('Decoding…');
+      // Show the real capture size (read cheaply from the JPEG header, no decode)
+      // so we can see whether the camera honoured the small resolution request,
+      // and yield first so that status actually paints before the decode seizes
+      // the thread — otherwise a slow/failed decode would still read "Reading
+      // photo…" and we'd blame the wrong step.
+      const bytes = new Uint8Array(buffer);
+      const dims = readJpegDimensions(bytes);
+      setStatus(dims ? `Decoding ${dims.width}×${dims.height}…` : 'Decoding…');
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      const frame = decodeJpegToRgba(new Uint8Array(buffer));
+      const frame = decodeJpegToRgba(bytes);
       if (!mounted.current) return;
 
       const { result, status: next } = await service.scanImageOnce(frame, (stage) => {
