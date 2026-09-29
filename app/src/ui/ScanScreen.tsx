@@ -7,19 +7,30 @@
  * it. Continuous live scanning streamed every camera frame to the JS thread and
  * froze the UI (the tab bar and chips live on that thread); a single capture on
  * demand does the heavy work once, so the rest of the UI stays responsive.
+ *
+ * The capture path is deliberately native-image-library-free: the photo output
+ * hands us encoded JPEG bytes (`getFileDataAsync`) which we decode in pure JS.
+ * Every attempt to resize/decode through nitro-image or expo-image-manipulator
+ * hung indefinitely on this build, so we forgo them entirely and instead ask for
+ * a small capture resolution to keep the JS decode cheap.
  */
 import * as Haptics from 'expo-haptics';
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput, usePreviewOutput } from 'react-native-vision-camera';
 import { GAMES, GameId } from '../data/types';
-import { imageToRgba } from '../scan/capture';
+import { decodeJpegToRgba } from '../scan/capture';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
-// Still-capture resolution. The pipeline downscales to its working width anyway,
-// so a modest photo keeps the capture and decode fast.
-const PHOTO_RESOLUTION = { width: 1280, height: 720 };
+// Still-capture resolution. We decode the JPEG in pure JS (jpeg-js), whose cost
+// and memory scale with pixel count, and the pipeline downscales to its working
+// width (540px) anyway — so we ask for a deliberately small capture. This build
+// negotiates `targetResolution` at the camera-session level (there is no classic
+// `format` selector in the Nitro API), and it prioritises the requested aspect
+// ratio over exact pixel count, so a modest 4:3 target keeps the photo — and
+// therefore the JS decode — small and well clear of any memory ceiling.
+const PHOTO_RESOLUTION = { width: 1024, height: 768 };
 
 // What each pipeline rejection reason means for the person holding the phone.
 const STATUS_TEXT: Record<string, string> = {
@@ -116,22 +127,30 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     setScanning(true);
     setStatus('Capturing…');
     try {
-      const photo = await photoOutput.capturePhoto({ enableShutterSound: false }, {});
+      const photo = await withTimeout(
+        photoOutput.capturePhoto({ enableShutterSound: false }, {}),
+        15000,
+        'capture',
+      );
       if (!mounted.current) return;
 
-      // Decode the JPEG to a native Image. This is the one unavoidable async
-      // native op; time it out so a stall surfaces as a readable error rather
-      // than an endless spinner (and tells us this is the step that hangs).
+      // Pull the encoded JPEG bytes off the photo. This is a vision-camera call
+      // (not a native image library) and has always resolved on this device;
+      // time it out anyway so any stall is a readable error, not a dead spinner.
       setStatus('Reading photo…');
-      const image = await withTimeout(photo.toImageAsync(), 15000, 'decode');
-      if (!mounted.current) {
-        photo.dispose();
-        return;
-      }
-      // The rest is synchronous native work (resize + read pixels) plus a small
-      // RGBA repack — no promises to hang on.
-      const frame = imageToRgba(image);
+      const buffer = await withTimeout(photo.getFileDataAsync(), 15000, 'read');
       photo.dispose();
+      if (!mounted.current) return;
+
+      // Decode in pure JS — the one decode path that doesn't hang on this build.
+      // Synchronous, so it briefly holds the JS thread; fine for a manual shutter.
+      // Yield first so "Decoding…" actually paints before the decode seizes the
+      // thread — otherwise a slow/failed decode would still read "Reading photo…"
+      // and we'd blame the wrong step.
+      setStatus('Decoding…');
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      const frame = decodeJpegToRgba(new Uint8Array(buffer));
+      if (!mounted.current) return;
 
       const { result, status: next } = await service.scanImageOnce(frame, (stage) => {
         if (mounted.current) setStatus(stage);
