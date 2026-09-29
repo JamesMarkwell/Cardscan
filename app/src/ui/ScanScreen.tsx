@@ -1,35 +1,40 @@
 /**
  * Camera screen: live preview with a manual shutter.
  *
- * Uses react-native-vision-camera. The preview renders natively and streams
- * continuously (cheap, off the JS thread). Scanning is manual: the user frames a
- * card and taps Scan, which captures one still and runs the identify pipeline on
- * it. Continuous live scanning streamed every camera frame to the JS thread and
- * froze the UI (the tab bar and chips live on that thread); a single capture on
- * demand does the heavy work once, so the rest of the UI stays responsive.
+ * Uses react-native-vision-camera. Scanning is manual: the user frames a card
+ * and taps Scan, which grabs a single camera frame and runs the identify
+ * pipeline on it.
  *
- * The capture path is deliberately native-image-library-free: the photo output
- * hands us encoded JPEG bytes (`getFileDataAsync`) which we decode in pure JS.
- * Every attempt to resize/decode through nitro-image or expo-image-manipulator
- * hung indefinitely on this build, so we forgo them entirely and instead ask for
- * a small capture resolution to keep the JS decode cheap.
+ * How we get the pixels is the whole story of this file. On this build every
+ * still-photo decode path hangs: nitro-image and expo-image-manipulator (async
+ * or sync) never return, and decoding the photo's JPEG bytes in pure JS with
+ * jpeg-js is too slow even at 720p (it froze on "Decoding 1280×720…"). What does
+ * work here is the camera's *frame output* — raw RGB buffers delivered on the
+ * frame-processor worklet thread, never encoded, the same mechanism the old live
+ * scanner used. Live scanning froze the UI only because it marshalled every
+ * frame to the JS thread; here the worklet discards every frame for free until
+ * the user taps Scan, at which point it copies exactly one frame's pixels over.
+ * So there is no JPEG, no native image library, and no per-frame JS work.
  */
 import * as Haptics from 'expo-haptics';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput, usePreviewOutput } from 'react-native-vision-camera';
+import { Camera, useCameraDevice, useCameraPermission, useFrameOutput, usePreviewOutput } from 'react-native-vision-camera';
+import { createSynchronizable, runOnJS } from 'react-native-worklets';
 import { GAMES, GameId } from '../data/types';
-import { decodeJpegToRgba, readJpegDimensions } from '../scan/capture';
+import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
-// Still-capture resolution. We decode the JPEG in pure JS (jpeg-js), whose cost
-// scales with pixel count, and the pipeline downscales to its working width
-// (540px) anyway — so we ask for a deliberately small capture. 1280x720 is a
-// resolution essentially every Android camera supports natively, so the session
-// is far more likely to honour it than an off-standard size (which it rounds up
-// to full sensor resolution — the very thing that made the JS decode grind).
-const PHOTO_RESOLUTION = { width: 1280, height: 720 };
+// Working frame size. The detector wants 384px and the dewarped crop 448px, so
+// this oversamples both while keeping the single per-capture pixel copy cheap.
+const FRAME_RESOLUTION = { width: 960, height: 540 };
+// Frames stream continuously but the worklet discards them for free until a
+// capture is requested, so a low rate is plenty and keeps power/heat down.
+const CAPTURE_FPS = 10;
+// If the camera hasn't delivered a frame this long after a tap, give up rather
+// than spin forever (e.g. the stream stalled).
+const CAPTURE_TIMEOUT_MS = 6000;
 
 // What each pipeline rejection reason means for the person holding the phone.
 const STATUS_TEXT: Record<string, string> = {
@@ -42,17 +47,6 @@ const STATUS_TEXT: Record<string, string> = {
 };
 
 const IDLE_STATUS = 'Point at a card and tap Scan';
-
-/** Reject if a promise has not settled within `ms`, so a stuck native call
- * surfaces as a readable error instead of an endless spinner. */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => {
-      setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
-    }),
-  ]);
-}
 
 interface Props {
   service: ScanService;
@@ -68,26 +62,27 @@ interface Props {
 export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady, syncing, paused }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
-  // The live preview only renders when a preview output is connected, and the
-  // photo output is what lets us capture a still to scan.
+  // The live preview only renders when a preview output is connected; the frame
+  // output is what lets us grab a still to scan.
   const previewOutput = usePreviewOutput();
-  const photoOutput = usePhotoOutput({
-    targetResolution: PHOTO_RESOLUTION,
-    // jpeg so we can decode the bytes ourselves with jpeg-js.
-    containerFormat: 'jpeg',
-    qualityPrioritization: 'balanced',
-    quality: 0.7,
-  });
   const [status, setStatus] = useState('Starting camera');
   const [modelsReady, setModelsReady] = useState(false);
   const [scanning, setScanning] = useState(false);
 
   const mounted = useRef(true);
+  // True from the moment Scan is tapped until we've consumed one frame. Guards
+  // against a stray frame being processed and against double-taps.
+  const awaitingCapture = useRef(false);
+  const watchdog = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Cross-runtime flag the worklet reads each frame: set true on tap, the
+  // worklet clears it as soon as it grabs the next frame.
+  const captureRequest = useMemo(() => createSynchronizable(false), []);
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      if (watchdog.current) clearTimeout(watchdog.current);
     };
   }, []);
 
@@ -115,70 +110,110 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
 
   // Scanning needs the models loaded and a settled catalogue.
   const ready = modelsReady && hasPermission && !paused && !syncing;
-  // The Camera streams the preview whenever we have permission and no result
-  // sheet is up. The preview does not need the models or the catalogue, so it
-  // stays live during "Updating catalogue…" instead of showing black.
+  // The Camera streams whenever we have permission and no result sheet is up.
   const cameraActive = hasPermission && !paused;
 
-  // Capture one still and identify it — the manual shutter.
-  const captureAndScan = async () => {
-    if (!ready || scanning) return;
+  // Runs on the JS thread with one grabbed frame's pixels. Guarded so only the
+  // frame captured for the current tap is processed.
+  const onCapturedFrame = useCallback(
+    (data: Uint8Array, width: number, height: number) => {
+      if (!awaitingCapture.current || !mounted.current) return;
+      awaitingCapture.current = false;
+      if (watchdog.current) {
+        clearTimeout(watchdog.current);
+        watchdog.current = null;
+      }
+      const frame: RgbaImage = { data, width, height };
+      void service
+        .scanImageOnce(frame, (stage) => {
+          if (mounted.current) setStatus(stage);
+        })
+        .then(({ result, status: next }) => {
+          if (!mounted.current) return;
+          if (result && result.printing) {
+            void Haptics.notificationAsync(
+              result.confidence.tier === 'high'
+                ? Haptics.NotificationFeedbackType.Success
+                : Haptics.NotificationFeedbackType.Warning,
+            );
+            onResult(result);
+            setStatus(IDLE_STATUS);
+          } else if (result) {
+            setStatus('No match — try again, filling the frame');
+          } else {
+            setStatus(STATUS_TEXT[next] ?? next);
+          }
+        })
+        .catch((error: Error) => {
+          if (mounted.current) setStatus(`Scan error: ${error.message}`);
+        })
+        .finally(() => {
+          if (mounted.current) setScanning(false);
+        });
+    },
+    [onResult, service],
+  );
+
+  const frameOutput = useFrameOutput({
+    pixelFormat: 'rgb',
+    targetResolution: FRAME_RESOLUTION,
+    // Hand us a display-upright buffer so the card is the right way up for the
+    // detector, regardless of sensor orientation.
+    enablePhysicalBufferRotation: true,
+    onFrame: (frame) => {
+      'worklet';
+      // Do nothing — and cost the JS thread nothing — until a capture is asked
+      // for. This is what keeps the UI responsive while the preview streams.
+      if (!captureRequest.getDirty()) {
+        frame.dispose();
+        return;
+      }
+      captureRequest.setBlocking(false);
+      const plane = frame.getPlanes()[0];
+      if (plane == null) {
+        frame.dispose();
+        return;
+      }
+      const width = plane.width;
+      const height = plane.height;
+      const bytesPerRow = plane.bytesPerRow;
+      const src = new Uint8Array(plane.getPixelBuffer());
+      // 'rgb' is 3 bytes/pixel, but some pipelines negotiate a 4-byte layout;
+      // derive it from the row stride and copy into compact RGBA.
+      const channels = Math.max(3, Math.round(bytesPerRow / width));
+      const out = new Uint8Array(width * height * 4);
+      for (let y = 0; y < height; y += 1) {
+        const row = y * bytesPerRow;
+        for (let x = 0; x < width; x += 1) {
+          const s = row + x * channels;
+          const d = (y * width + x) * 4;
+          out[d] = src[s];
+          out[d + 1] = src[s + 1];
+          out[d + 2] = src[s + 2];
+          out[d + 3] = 255;
+        }
+      }
+      frame.dispose();
+      runOnJS(onCapturedFrame)(out, width, height);
+    },
+  });
+
+  // The manual shutter: ask the worklet to grab the next frame.
+  const requestScan = () => {
+    if (!ready || awaitingCapture.current) return;
+    awaitingCapture.current = true;
     setScanning(true);
     setStatus('Capturing…');
-    try {
-      const photo = await withTimeout(
-        photoOutput.capturePhoto({ enableShutterSound: false }, {}),
-        15000,
-        'capture',
-      );
-      if (!mounted.current) return;
-
-      // Pull the encoded JPEG bytes off the photo. This is a vision-camera call
-      // (not a native image library) and has always resolved on this device;
-      // time it out anyway so any stall is a readable error, not a dead spinner.
-      setStatus('Reading photo…');
-      const buffer = await withTimeout(photo.getFileDataAsync(), 15000, 'read');
-      photo.dispose();
-      if (!mounted.current) return;
-
-      // Decode in pure JS — the one decode path that doesn't hang on this build.
-      // Synchronous, so it briefly holds the JS thread; fine for a manual shutter.
-      // Show the real capture size (read cheaply from the JPEG header, no decode)
-      // so we can see whether the camera honoured the small resolution request,
-      // and yield first so that status actually paints before the decode seizes
-      // the thread — otherwise a slow/failed decode would still read "Reading
-      // photo…" and we'd blame the wrong step.
-      const bytes = new Uint8Array(buffer);
-      const dims = readJpegDimensions(bytes);
-      setStatus(dims ? `Decoding ${dims.width}×${dims.height}…` : 'Decoding…');
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      const frame = decodeJpegToRgba(bytes);
-      if (!mounted.current) return;
-
-      const { result, status: next } = await service.scanImageOnce(frame, (stage) => {
-        if (mounted.current) setStatus(stage);
-      });
-      if (!mounted.current) return;
-
-      if (result && result.printing) {
-        void Haptics.notificationAsync(
-          result.confidence.tier === 'high'
-            ? Haptics.NotificationFeedbackType.Success
-            : Haptics.NotificationFeedbackType.Warning,
-        );
-        onResult(result);
-        setStatus(IDLE_STATUS);
-      } else if (result) {
-        // The pipeline ran but matched nothing confidently.
-        setStatus('No match — try again, filling the frame');
-      } else {
-        setStatus(STATUS_TEXT[next] ?? next);
+    captureRequest.setBlocking(true);
+    watchdog.current = setTimeout(() => {
+      if (!awaitingCapture.current) return;
+      awaitingCapture.current = false;
+      captureRequest.setBlocking(false);
+      if (mounted.current) {
+        setScanning(false);
+        setStatus('Camera didn’t deliver a frame — try again');
       }
-    } catch (error) {
-      if (mounted.current) setStatus(`Scan error: ${(error as Error).message}`);
-    } finally {
-      if (mounted.current) setScanning(false);
-    }
+    }, CAPTURE_TIMEOUT_MS);
   };
 
   if (!hasPermission) {
@@ -208,7 +243,8 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
         style={StyleSheet.absoluteFill}
         device={device}
         isActive={cameraActive}
-        outputs={[previewOutput, photoOutput]}
+        outputs={frameOutput ? [previewOutput, frameOutput] : [previewOutput]}
+        constraints={[{ fps: CAPTURE_FPS }]}
       />
 
       <View pointerEvents="none" style={styles.frameGuide} />
@@ -242,7 +278,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
           accessibilityRole="button"
           accessibilityLabel="Scan card"
           disabled={!ready || scanning}
-          onPress={() => void captureAndScan()}
+          onPress={requestScan}
           style={[styles.shutter, (!ready || scanning) && styles.shutterDisabled]}
         >
           {scanning ? (
