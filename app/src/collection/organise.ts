@@ -3,7 +3,7 @@
  * rows the database returns, so the screen stays thin and this is easy to test.
  */
 import type { CollectionRow } from '../data/db';
-import type { Condition, GameId } from '../data/types';
+import type { Condition, GameId, Price } from '../data/types';
 
 export type SortKey = 'recent' | 'name' | 'nameDesc' | 'price' | 'priceAsc' | 'quantity' | 'set';
 
@@ -122,4 +122,14 @@ export function formatMoney(amount: number | null, currency: string | null): str
 /** The label for a sort key, for showing the current choice. */
 export function sortLabel(key: SortKey): string {
   return SORTS.find((sort) => sort.key === key)?.label ?? '';
+}
+
+/** The price to show: Cardmarket's if we have it, otherwise TCGplayer's. */
+export function bestPrice(prices: Price[]): { value: number; currency: string } | null {
+  const ordered = [...prices].sort((a, b) => (a.source === 'cardmarket' ? -1 : 1) - (b.source === 'cardmarket' ? -1 : 1));
+  for (const price of ordered) {
+    const value = price.market ?? price.trend ?? price.low;
+    if (value !== null && value !== undefined) return { value, currency: price.currency };
+  }
+  return null;
 }

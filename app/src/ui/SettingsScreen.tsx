@@ -114,6 +114,10 @@ export function SettingsScreen({ settings, onChange, onSynced }: Props) {
         />
       </View>
       <View style={styles.switchRow}>
+        <Text style={styles.switchLabel}>Play a kerching when a card is added</Text>
+        <Switch value={settings.soundEffects} onValueChange={(value) => update({ soundEffects: value })} />
+      </View>
+      <View style={styles.switchRow}>
         <Text style={styles.switchLabel}>Keep my corrections to improve matching</Text>
         <Switch value={settings.shareCorrections} onValueChange={(value) => update({ shareCorrections: value })} />
       </View>

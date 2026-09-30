@@ -26,7 +26,9 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-nati
 import { Camera, useCameraDevice, useCameraPermission, useFrameOutput, usePreviewOutput } from 'react-native-vision-camera';
 import type { Frame } from 'react-native-vision-camera';
 import { runOnJS } from 'react-native-worklets';
-import { GAMES, GameId } from '../data/types';
+import { addToCollection, defaultPortfolio, ownedQuantity, removeOneFromCollection } from '../data/db';
+import { Condition, GAMES, GameId, Printing } from '../data/types';
+import { playKerching } from '../feedback/kerching';
 import { crumb, readCrumbs } from '../debug/breadcrumbs';
 import {
   AutoScanState,
@@ -39,6 +41,7 @@ import {
 } from '../scan/autoScan';
 import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
+import { AddedCard, AddedToast } from './AddedToast';
 import { theme } from './theme';
 
 // Frame size. Detection (384px) and the picture match (448px) would be fine on
@@ -129,6 +132,12 @@ interface Props {
   /** Scan by itself when a card is held steady, as well as on the Scan button. */
   autoScan: boolean;
   onAutoScanChange: (on: boolean) => void;
+  /** Add high-confidence matches to the collection without asking. */
+  autoAdd: boolean;
+  /** Play the kerching when one is added. */
+  sound: boolean;
+  /** Something was added to the collection, so lists showing it should reload. */
+  onAdded: () => void;
 }
 
 export function ScanScreen({
@@ -141,6 +150,9 @@ export function ScanScreen({
   paused,
   autoScan,
   onAutoScanChange,
+  autoAdd,
+  sound,
+  onAdded,
 }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
@@ -173,6 +185,14 @@ export function ScanScreen({
   // schedule): whether auto-scan is on, and whether a scan is being processed.
   const autoRef = useRef(autoScan);
   const busyRef = useRef(false);
+  // Read from callbacks that outlive a render (see processFrame).
+  const autoAddRef = useRef(autoAdd);
+  autoAddRef.current = autoAdd;
+  const soundRef = useRef(sound);
+  soundRef.current = sound;
+  // The popup for the card just added, and what to take back if Undo is tapped.
+  const [added, setAdded] = useState<AddedCard | null>(null);
+  const lastAdd = useRef<{ portfolioId: number; printingId: string; variant: Printing['variant']; condition: Condition } | null>(null);
   // The scene the last auto-scan looked at. The camera thread tracks this too, but
   // its state is lost if the camera restarts, so the JS side refuses a repeat as well.
   const lastAutoScene = useRef<{ scene: number[]; at: number } | null>(null);
@@ -264,6 +284,43 @@ export function ScanScreen({
   const idleStatus = useCallback(() => (autoRef.current ? AUTO_IDLE_STATUS : IDLE_STATUS), []);
 
   /**
+   * Add a high-confidence match to the collection without asking: one near-mint
+   * copy, a haptic tap, the kerching, and a small popup with Undo. If saving fails
+   * the normal result sheet is shown instead, so the scan is never lost.
+   */
+  const addAutomatically = useCallback(
+    async (result: ScanResult, printing: Printing) => {
+      try {
+        const portfolio = await defaultPortfolio();
+        const variant = printing.variant;
+        const condition: Condition = 'NM';
+        await addToCollection({ portfolioId: portfolio.id, printingId: printing.id, variant, condition, quantity: 1 });
+        const owned = await ownedQuantity(portfolio.id, printing.id, variant, condition);
+        lastAdd.current = { portfolioId: portfolio.id, printingId: printing.id, variant, condition };
+        crumb(`js: auto-added ${printing.id} (now owns ${owned})`);
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        if (soundRef.current) playKerching();
+        onAdded();
+        if (mounted.current) setAdded({ printing, owned });
+      } catch (error) {
+        crumb(`js: auto-add failed ${String(error)}`);
+        if (mounted.current) onResult(result);
+      }
+    },
+    [onAdded, onResult],
+  );
+
+  const undoAdd = useCallback(async () => {
+    const last = lastAdd.current;
+    setAdded(null);
+    if (!last) return;
+    lastAdd.current = null;
+    await removeOneFromCollection(last.portfolioId, last.printingId, last.variant, last.condition);
+    crumb(`js: undid add of ${last.printingId}`);
+    onAdded();
+  }, [onAdded]);
+
+  /**
    * Identify one grabbed frame and show the outcome. `origin` decides how a miss
    * is worded: after a tap it is guidance, but auto-scan tries whenever a picture
    * settles, so "no card in view" is just the normal state, not a complaint.
@@ -281,7 +338,10 @@ export function ScanScreen({
         .then(({ result, status: next }) => {
           crumb(`js: scan finished status=${next} printing=${result?.printing?.id ?? 'none'}`);
           if (!mounted.current) return;
-          if (result && result.printing) {
+          if (result && result.printing && result.confidence.tier === 'high' && autoAddRef.current) {
+            void addAutomatically(result, result.printing);
+            setStatus(idleStatus());
+          } else if (result && result.printing) {
             void Haptics.notificationAsync(
               result.confidence.tier === 'high'
                 ? Haptics.NotificationFeedbackType.Success
@@ -306,7 +366,7 @@ export function ScanScreen({
           if (mounted.current) setScanning(false);
         });
     },
-    [idleStatus, onResult, service],
+    [addAutomatically, idleStatus, onResult, service],
   );
 
   // A frame grabbed for a tap on Scan. Guarded so only the frame asked for is used.
@@ -562,6 +622,12 @@ export function ScanScreen({
           )}
         </Pressable>
       </View>
+
+      {added ? (
+        <View style={styles.toastSlot} pointerEvents="box-none">
+          <AddedToast added={added} onUndo={() => void undoAdd()} onDismiss={() => setAdded(null)} />
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -617,9 +683,16 @@ const styles = StyleSheet.create({
   gameChipActive: { backgroundColor: theme.accent, borderColor: theme.accent },
   gameChipText: { color: theme.textMuted, fontSize: 12 },
   gameChipTextActive: { color: '#fff', fontWeight: '600' },
+  // Room under the shutter for the "added" popup.
+  toastSlot: {
+    position: 'absolute',
+    bottom: theme.spacing(1.5),
+    left: theme.spacing(2),
+    right: theme.spacing(2),
+  },
   controls: {
     position: 'absolute',
-    bottom: theme.spacing(4),
+    bottom: theme.spacing(11),
     left: theme.spacing(2),
     right: theme.spacing(2),
     alignItems: 'center',

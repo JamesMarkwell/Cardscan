@@ -468,6 +468,37 @@ export async function removeFromCollection(id: number): Promise<void> {
   await db.runAsync('DELETE FROM collection WHERE id = ?', [id]);
 }
 
+/** How many of an exact card (printing, version, condition) are in the collection. */
+export async function ownedQuantity(
+  portfolioId: number,
+  printingId: string,
+  variant: Variant,
+  condition: Condition,
+): Promise<number> {
+  const db = await openDatabase();
+  const row = await db.getFirstAsync<{ quantity: number }>(
+    'SELECT quantity FROM collection WHERE portfolio_id = ? AND printing_id = ? AND variant = ? AND condition = ?',
+    [portfolioId, printingId, variant, condition],
+  );
+  return row?.quantity ?? 0;
+}
+
+/** Take one copy back out (Undo): a stack of several loses one, a single copy is removed. */
+export async function removeOneFromCollection(
+  portfolioId: number,
+  printingId: string,
+  variant: Variant,
+  condition: Condition,
+): Promise<void> {
+  const db = await openDatabase();
+  await db.withTransactionAsync(async () => {
+    const where = 'portfolio_id = ? AND printing_id = ? AND variant = ? AND condition = ?';
+    const args = [portfolioId, printingId, variant, condition];
+    await db.runAsync(`UPDATE collection SET quantity = quantity - 1 WHERE ${where} AND quantity > 1`, args);
+    await db.runAsync(`DELETE FROM collection WHERE ${where} AND quantity <= 1`, args);
+  });
+}
+
 /** Remove several collection rows at once. */
 export async function removeManyFromCollection(ids: number[]): Promise<void> {
   if (ids.length === 0) return;

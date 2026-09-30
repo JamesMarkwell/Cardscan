@@ -3,7 +3,7 @@
  * matters here is the SQL they issue and the merge rule when an edit would make
  * two rows identical.
  */
-import { closeDatabase, openDatabase, removeFromCollection, removeManyFromCollection, searchPrintings, updateCollectionEntry } from '../data/db';
+import { closeDatabase, openDatabase, removeFromCollection, removeManyFromCollection, removeOneFromCollection, ownedQuantity, searchPrintings, updateCollectionEntry } from '../data/db';
 
 const db = {
   execAsync: jest.fn().mockResolvedValue(undefined),
@@ -77,6 +77,23 @@ it('removeFromCollection deletes just that row', async () => {
   await removeFromCollection(4);
   const call = db.runAsync.mock.calls.find(([sql]) => String(sql).startsWith('DELETE FROM collection'));
   expect(call?.[1]).toEqual([4]);
+});
+
+describe('undoing an automatic add', () => {
+  it('takes one copy off a stack, and removes a single copy, for that exact card only', async () => {
+    await removeOneFromCollection(1, 'p1', 'foil', 'NM');
+    const sql = db.runAsync.mock.calls.map(([q]) => String(q).replace(/\s+/g, ' '));
+    expect(sql.some((q) => q.startsWith('UPDATE collection SET quantity = quantity - 1') && q.includes('AND quantity > 1'))).toBe(true);
+    expect(sql.some((q) => q.startsWith('DELETE FROM collection') && q.includes('AND quantity <= 1'))).toBe(true);
+    for (const [, args] of db.runAsync.mock.calls) expect(args).toEqual([1, 'p1', 'foil', 'NM']);
+  });
+
+  it('reports how many of a card are owned, zero when none', async () => {
+    db.getFirstAsync.mockResolvedValueOnce({ quantity: 3 });
+    expect(await ownedQuantity(1, 'p1', 'normal', 'NM')).toBe(3);
+    db.getFirstAsync.mockResolvedValueOnce(null);
+    expect(await ownedQuantity(1, 'p2', 'normal', 'NM')).toBe(0);
+  });
 });
 
 describe('removeManyFromCollection', () => {

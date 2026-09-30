@@ -133,6 +133,9 @@ export default function App() {
               onGameChange={(gameId) => setSettings((current) => ({ ...current, gameId }))}
               onResult={setResult}
               autoScan={settings.autoScan}
+              autoAdd={settings.autoAddHighConfidence}
+              sound={settings.soundEffects}
+              onAdded={() => setCollectionKey((key) => key + 1)}
               onAutoScanChange={(autoScan) => {
                 const next = { ...settings, autoScan };
                 setSettings(next);

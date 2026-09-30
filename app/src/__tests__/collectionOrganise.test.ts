@@ -1,5 +1,6 @@
 import {
   NO_FILTERS,
+  bestPrice,
   applyFilters,
   formatMoney,
   gamesPresent,
@@ -151,4 +152,27 @@ it('formatMoney shows the currency symbol, or a dash with no price', () => {
 it('sortLabel names the sort', () => {
   expect(sortLabel('name')).toBe('Name A–Z');
   expect(sortLabel('price')).toBe('Price high to low');
+});
+
+describe('bestPrice', () => {
+  const price = (source: 'tcgplayer' | 'cardmarket', over: Partial<{ market: number | null; trend: number | null; low: number | null; currency: string }>) => ({
+    printingId: 'p', source, currency: 'USD', market: null, low: null, trend: null, avg7: null, avg30: null, asOf: '2026-09-30',
+    ...over,
+  });
+
+  it('prefers Cardmarket, then TCGplayer', () => {
+    const chosen = bestPrice([price('tcgplayer', { market: 5 }), price('cardmarket', { market: 4, currency: 'EUR' })]);
+    expect(chosen).toEqual({ value: 4, currency: 'EUR' });
+    expect(bestPrice([price('tcgplayer', { market: 5 })])).toEqual({ value: 5, currency: 'USD' });
+  });
+
+  it('falls back through market, trend and low, and to the other source when one is empty', () => {
+    expect(bestPrice([price('tcgplayer', { low: 2 })])).toEqual({ value: 2, currency: 'USD' });
+    expect(bestPrice([price('cardmarket', {}), price('tcgplayer', { market: 3 })])).toEqual({ value: 3, currency: 'USD' });
+  });
+
+  it('is null when nothing has a price', () => {
+    expect(bestPrice([])).toBeNull();
+    expect(bestPrice([price('tcgplayer', {})])).toBeNull();
+  });
 });
