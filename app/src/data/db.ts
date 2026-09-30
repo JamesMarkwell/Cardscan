@@ -219,6 +219,20 @@ export async function printingsForIndexRow(
   return { artId: match.art_id, printings };
 }
 
+/**
+ * Every printing of a game that carries a given printed serial — "OP17-070" for
+ * One Piece. A serial pins the card down almost exactly, so this is a handful of
+ * rows: the original, reprints in other sets, foil and alternate-art versions.
+ */
+export async function printingsBySerial(gameId: GameId, serial: string): Promise<Printing[]> {
+  const db = await openDatabase();
+  const rows = await db.getAllAsync<PrintingRow>(
+    `${PRINTING_SELECT} WHERE p.game_id = ? AND p.number = ? ORDER BY s.release_date DESC, p.id ASC`,
+    [gameId, serial],
+  );
+  return rows.map(toPrinting);
+}
+
 export async function printingById(id: string): Promise<Printing | null> {
   const db = await openDatabase();
   const row = await db.getFirstAsync<PrintingRow>(`${PRINTING_SELECT} WHERE p.id = ?`, [id]);

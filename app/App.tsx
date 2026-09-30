@@ -3,11 +3,13 @@ import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { openDatabase } from './src/data/db';
+import { crumb } from './src/debug/breadcrumbs';
 import { ErrorBoundary } from './src/ui/ErrorBoundary';
 import { loadIndexPack } from './src/data/indexPack';
 import { Settings, loadSettings } from './src/data/settings';
 import { fetchManifest, localVersion, syncGame } from './src/data/sync';
 import { ScanResult, ScanService } from './src/scan/scanService';
+import { readSerial } from './src/scan/serialOcr';
 import { CollectionScreen } from './src/ui/CollectionScreen';
 import { ResultSheet } from './src/ui/ResultSheet';
 import { ScanScreen } from './src/ui/ScanScreen';
@@ -30,7 +32,17 @@ export default function App() {
   const [indexReady, setIndexReady] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
-  const service = useMemo(() => new ScanService({ gameId: settings.gameId, framesPerScan: 3 }), []);
+  const service = useMemo(
+    () =>
+      new ScanService({
+        gameId: settings.gameId,
+        framesPerScan: 3,
+        // The printed serial (One Piece's OP17-070) is read on-device and checked
+        // first; each step is logged so a failed read shows up in the scan log.
+        serialReader: (game, frame, corners) => readSerial(game, frame, corners, (message) => crumb(message)),
+      }),
+    [],
+  );
 
   useEffect(() => {
     void openDatabase();

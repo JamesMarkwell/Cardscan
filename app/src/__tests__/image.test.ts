@@ -1,4 +1,4 @@
-import { cropNormalised, dewarp, laplacianVariance, rotate180, rotate90, squashResize, toImageNetTensor, IMAGENET_MEAN, IMAGENET_STD, RgbaImage } from '../scan/image';
+import { cropNormalised, dewarp, dewarpRegion, laplacianVariance, rotate180, rotate90, squashResize, toImageNetTensor, IMAGENET_MEAN, IMAGENET_STD, RgbaImage } from '../scan/image';
 import { Point } from '../scan/geometry';
 
 function solid(width: number, height: number, rgb: [number, number, number]): RgbaImage {
@@ -148,5 +148,48 @@ describe('rotate90', () => {
     const image = labelled();
     expect(ids(rotate90(rotate90(image, true), false))).toEqual(ids(image));
     expect(ids(rotate90(rotate90(image, true), true))).toEqual(ids(rotate180(image)));
+  });
+});
+
+describe('dewarpRegion', () => {
+  /** 40x40 frame: the top half is red, the bottom half blue, left third green. */
+  function frame(): RgbaImage {
+    const width = 40;
+    const height = 40;
+    const data = new Uint8Array(width * height * 4);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const o = (y * width + x) * 4;
+        const rgb = x < 13 ? [0, 255, 0] : y < 20 ? [255, 0, 0] : [0, 0, 255];
+        data.set([rgb[0], rgb[1], rgb[2], 255], o);
+      }
+    }
+    return { data, width, height };
+  }
+  const upright: Point[] = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  const pixel = (image: RgbaImage, x: number, y: number) => Array.from(image.data.slice((y * image.width + x) * 4, (y * image.width + x) * 4 + 3));
+
+  it('returns the requested size and samples the requested part of the card', () => {
+    // Bottom-right of the card is blue; top-right is red.
+    const bottomRight = dewarpRegion(frame(), upright, { left: 0.6, top: 0.6, width: 0.4, height: 0.4 }, 8, 6);
+    expect([bottomRight.width, bottomRight.height]).toEqual([8, 6]);
+    expect(pixel(bottomRight, 4, 3)).toEqual([0, 0, 255]);
+
+    const topRight = dewarpRegion(frame(), upright, { left: 0.6, top: 0.0, width: 0.4, height: 0.4 }, 8, 6);
+    expect(pixel(topRight, 4, 3)).toEqual([255, 0, 0]);
+  });
+
+  it('follows the corners: a card turned half a turn has its bottom-right where the frame’s top-left is', () => {
+    // Corners listed TL,TR,BR,BL of a card that sits upside down in the frame.
+    const upsideDown: Point[] = [[1, 1], [0, 1], [0, 0], [1, 0]];
+    // The card's bottom-right corner is the frame's top-left: green there.
+    const region = dewarpRegion(frame(), upsideDown, { left: 0.85, top: 0.85, width: 0.15, height: 0.15 }, 4, 4);
+    expect(pixel(region, 2, 2)).toEqual([0, 255, 0]);
+  });
+
+  it('reads a wide strip at the card’s own proportions from a skewed quad', () => {
+    const skewed: Point[] = [[0.1, 0.05], [0.95, 0.1], [0.9, 0.95], [0.05, 0.9]];
+    const strip = dewarpRegion(frame(), skewed, { left: 0.45, top: 0.86, width: 0.55, height: 0.14 }, 64, 23);
+    expect(strip.data).toHaveLength(64 * 23 * 4);
   });
 });

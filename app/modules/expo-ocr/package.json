@@ -1,0 +1,7 @@
+{
+  "name": "expo-ocr",
+  "version": "0.1.0",
+  "description": "Local Expo module: on-device text recognition (ML Kit), New Architecture compatible.",
+  "main": "src/index.ts",
+  "private": true
+}
