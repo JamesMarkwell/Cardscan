@@ -1,29 +1,91 @@
 /**
  * Turning a camera photo into the RGBA buffer the pipeline works on.
  *
- * The native resize does the heavy lifting: decoding a full-resolution photo in
- * JavaScript would be far too slow. Even the working buffer's JPEG decode and
- * pixel loops run synchronously on the JS thread, so its cost is what the camera
- * loop pays every frame — and while it runs, React Native can't service touches.
- * 540px keeps that decode/resize cost down (it scales with pixel count, so this
- * is ~40% cheaper than 720px) while still giving the 384px detector and the
- * dewarped 448px crop more than enough resolution.
+ * Hard-won lesson from this device: the native image libraries can't be trusted
+ * here. Every nitro-image and expo-image-manipulator call — async or sync —
+ * either never resolves or jams the JS thread so hard that even a setTimeout
+ * can't fire ("Reading photo…" forever). The only decode that reliably runs is
+ * jpeg-js, which is pure JavaScript and so cannot hang on a native bridge. Its
+ * one weakness is memory: decoding a full-resolution sensor image allocates tens
+ * of MB and OOM-crashes. We avoid that by forcing a small camera *format* (see
+ * ScanScreen) so the captured JPEG is modest, then decode it here with generous
+ * memory guards that turn any surprise large image into a catchable error rather
+ * than a crash. The full-res buffer is downscaled to the working width in JS
+ * before it reaches the pipeline, which expects a ~540px frame.
  */
-import { SaveFormat, manipulateAsync } from 'expo-image-manipulator';
+import { ImageManipulator, SaveFormat, manipulateAsync } from 'expo-image-manipulator';
 import { decode as decodeJpeg } from 'jpeg-js';
 import { base64ToBytes } from './base64';
 import { RgbaImage } from './image';
+import { MAX_DECODE_PIXELS, readJpegDimensions } from './jpegHeader';
 
 /** Working width. TCGplayer's own guidance is that resolution past ~100 DPI adds nothing. */
 export const WORKING_WIDTH = 540;
 
-/** Load a photo file as an RGBA buffer, downscaled to the working width. */
-export async function loadFrame(uri: string, width = WORKING_WIDTH): Promise<RgbaImage> {
-  const resized = await manipulateAsync(uri, [{ resize: { width } }], {
-    base64: true,
-    compress: 0.92,
-    format: SaveFormat.JPEG,
+// Re-export so callers can read the capture size without reaching past capture.
+export { readJpegDimensions } from './jpegHeader';
+
+/**
+ * Decode encoded JPEG bytes (straight from the camera's photo output) into an
+ * RGBA buffer, downscaled to the working width. Pure JS — no native image
+ * library, which is the whole point: those hang on this build. Rejects an
+ * over-large image up front (see {@link MAX_DECODE_PIXELS}) so a capture the
+ * camera refused to shrink surfaces as a readable "Scan error" naming the size,
+ * rather than freezing the JS thread for tens of seconds.
+ */
+export function decodeJpegToRgba(bytes: Uint8Array, width = WORKING_WIDTH): RgbaImage {
+  const dims = readJpegDimensions(bytes);
+  if (dims && dims.width * dims.height > MAX_DECODE_PIXELS) {
+    throw new Error(
+      `photo too large to decode (${dims.width}×${dims.height}); the camera ignored the resolution request`,
+    );
+  }
+  const decoded = decodeJpeg(bytes, {
+    useTArray: true,
+    formatAsRGBA: true,
+    maxResolutionInMP: 25,
+    maxMemoryUsageInMB: 128,
   });
+  return downscaleRgba({ data: decoded.data, width: decoded.width, height: decoded.height }, width);
+}
+
+/** Nearest-neighbour downscale to a target width. Cheap and good enough — the
+ * detector and embedder work on much smaller crops anyway. A no-op when the
+ * source is already at or below the target width. */
+function downscaleRgba(src: RgbaImage, targetWidth: number): RgbaImage {
+  if (src.width <= targetWidth) return src;
+  const scale = targetWidth / src.width;
+  const w = targetWidth;
+  const h = Math.max(1, Math.round(src.height * scale));
+  const out = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y += 1) {
+    const sy = Math.min(src.height - 1, Math.floor(y / scale));
+    const srow = sy * src.width * 4;
+    const orow = y * w * 4;
+    for (let x = 0; x < w; x += 1) {
+      const sx = Math.min(src.width - 1, Math.floor(x / scale));
+      const s = srow + sx * 4;
+      const d = orow + x * 4;
+      out[d] = src.data[s];
+      out[d + 1] = src.data[s + 1];
+      out[d + 2] = src.data[s + 2];
+      out[d + 3] = 255;
+    }
+  }
+  return { data: out, width: w, height: h };
+}
+
+/**
+ * Load a photo file as an RGBA buffer, downscaled to the working width.
+ *
+ * The resize happens natively (fast) so jpeg-js only ever decodes a small ~540px
+ * image; decoding a full-resolution capture in JS would take many seconds and
+ * appear to hang. Uses the modern ImageManipulator API — the legacy
+ * `manipulateAsync` never resolves on SDK 57.
+ */
+export async function loadFrame(uri: string, width = WORKING_WIDTH): Promise<RgbaImage> {
+  const image = await ImageManipulator.manipulate(uri).resize({ width }).renderAsync();
+  const resized = await image.saveAsync({ base64: true, compress: 0.92, format: SaveFormat.JPEG });
 
   if (!resized.base64) throw new Error('Resize produced no image data');
 

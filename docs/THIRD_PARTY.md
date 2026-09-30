@@ -27,6 +27,15 @@ target).
 The version is pinned deliberately: an upstream model change would silently
 change what the app recognises, so upgrading is a decision, not a side effect.
 
+### On-device text recognition
+
+Card serial numbers (One Piece's `OP17-070`) are read with **Google ML Kit text
+recognition** (`com.google.mlkit:text-recognition`, pinned to 16.0.1), through a
+local Expo module, `app/modules/expo-ocr`. It uses the *bundled* Latin model, so
+recognition is fully offline and needs no Google Play services download. It is a
+proprietary SDK used under Google's ML Kit terms, not part of CollectorVision;
+check those terms before any store release.
+
 ### What the AGPL means here
 
 CollectorVision is licensed AGPL-3.0, so:

@@ -1,13 +1,17 @@
 """Nightly fingerprint job.
 
-Asks the Worker which printings have no fingerprint yet, downloads their card
-images, embeds them with CollectorVision's Milo model, appends the rows to that
-game's index pack and uploads it to R2. Adding new sets never needs retraining —
-only new fingerprints.
+Keeps each game's index pack complete. The pack — not the Worker's
+"fingerprinted" flag — is the source of truth: the job downloads the newest pack
+already in R2, lists every printing that has an image, embeds the ones the pack
+lacks with CollectorVision's Milo model, and uploads the grown pack. Adding new
+sets never needs retraining — only new fingerprints.
+
+It works in chunks and uploads after each, so a run that times out (or a game
+with tens of thousands of printings the first time) keeps its progress and the
+next run carries on from where it stopped.
 
 Runs on GitHub Actions rather than in a Worker: Workers have tight memory and
-CPU limits and no practical way to run an image model, while a handful of new
-cards a day is nothing for a CPU runner.
+CPU limits and no practical way to run an image model.
 
     python fingerprint_job.py --game onepiece --version 20260921
 """
@@ -18,9 +22,12 @@ import argparse
 import io
 import logging
 import os
+import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import requests
@@ -32,7 +39,12 @@ LOG = logging.getLogger("fingerprint")
 
 EMBEDDER_SIZE = 448
 REQUEST_TIMEOUT = 30
-# Be polite to the image hosts: one at a time, with a descriptive agent.
+# Embed, then upload, this many images at a time: progress survives a timeout,
+# and only one chunk of decoded images is in memory at once.
+CHUNK_SIZE = 1000
+# Be polite to the image hosts: a few requests at a time, with a descriptive agent.
+DOWNLOAD_WORKERS = 4
+PACK_KEY = re.compile(r"^games/(?P<game>[^/]+)/index-(?P<version>[^/]+)\.bin$")
 USER_AGENT = "CardScan-fingerprint/0.1 (+https://github.com/JamesMarkwell/cardscan)"
 
 
@@ -43,18 +55,29 @@ class Pending:
     image_url: str
 
 
-def fetch_pending(worker_url: str, token: str, game: str, limit: int) -> list[Pending]:
-    response = requests.get(
-        f"{worker_url.rstrip('/')}/admin/pending-fingerprints",
-        params={"game": game, "limit": limit},
-        headers={"Authorization": f"Bearer {token}", "User-Agent": USER_AGENT},
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-    return [
-        Pending(printing_id=row["id"], game_id=row["gameId"], image_url=row["imageUrl"])
-        for row in response.json()["printings"]
-    ]
+def fetch_printings(worker_url: str, token: str, game: str, page_size: int = 2000) -> list[Pending]:
+    """Every printing of a game that has an image, however it was fingerprinted before.
+
+    The Worker's "fingerprinted" flag says a printing was embedded once, not that
+    its row is still in the pack, so it is not what decides what to embed.
+    """
+    printings: list[Pending] = []
+    offset = 0
+    while True:
+        response = requests.get(
+            f"{worker_url.rstrip('/')}/admin/pending-fingerprints",
+            params={"game": game, "all": 1, "limit": page_size, "offset": offset},
+            headers={"Authorization": f"Bearer {token}", "User-Agent": USER_AGENT},
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        rows = response.json()["printings"]
+        printings.extend(
+            Pending(printing_id=row["id"], game_id=row["gameId"], image_url=row["imageUrl"]) for row in rows
+        )
+        if len(rows) < page_size:
+            return printings
+        offset += page_size
 
 
 def current_version(worker_url: str, game: str) -> str | None:
@@ -99,7 +122,8 @@ def load_existing(path: Path) -> IndexPack:
     return IndexPack(matrix=np.empty((0, 128), dtype=np.float32), ids=[])
 
 
-def upload_to_r2(local: Path, key: str) -> None:
+def r2_client():
+    """The R2 client and bucket name, from the environment."""
     import boto3
 
     account = os.environ["R2_ACCOUNT_ID"]
@@ -110,7 +134,109 @@ def upload_to_r2(local: Path, key: str) -> None:
         aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
         region_name="auto",
     )
-    client.upload_file(str(local), os.environ.get("R2_BUCKET", "cardscan-packs"), key)
+    return client, os.environ.get("R2_BUCKET", "cardscan-packs")
+
+
+def upload_to_r2(local: Path, key: str) -> None:
+    client, bucket = r2_client()
+    client.upload_file(str(local), bucket, key)
+
+
+def newest_pack_version(keys: list[str], game: str, at_most: str) -> str | None:
+    """The newest index-pack version among `keys` for a game, no newer than `at_most`.
+
+    Versions are YYYYMMDD strings, so they order correctly as text. Keys for other
+    games and files that are not a pack's .bin are ignored.
+    """
+    versions = []
+    for key in keys:
+        match = PACK_KEY.match(key)
+        if match and match.group("game") == game and match.group("version") <= at_most:
+            versions.append(match.group("version"))
+    return max(versions) if versions else None
+
+
+def download_base_pack(game: str, version: str, pack_path: Path) -> IndexPack | None:
+    """Fetch the newest pack already in R2 for this game, to add to rather than replace.
+
+    Without this the job starts from an empty pack each night on a fresh runner,
+    then uploads over the real one with only that night's rows — silently dropping
+    every card fingerprinted before.
+    """
+    client, bucket = r2_client()
+    keys: list[str] = []
+    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=f"games/{game}/index-"):
+        keys.extend(item["Key"] for item in page.get("Contents", []))
+
+    base = newest_pack_version(keys, game, version)
+    if base is None:
+        LOG.info("no existing pack for %s — starting a new one", game)
+        return None
+
+    key = f"games/{game}/index-{base}.bin"
+    pack_path.parent.mkdir(parents=True, exist_ok=True)
+    client.download_file(bucket, key, str(pack_path))
+    client.download_file(bucket, key.replace(".bin", ".ids"), str(pack_path.with_suffix(".ids")))
+    pack = read_pack(pack_path)
+    LOG.info("starting from %s: %d rows", key, pack.matrix.shape[0])
+    return pack
+
+
+def select_missing(printings: list[Pending], have: set[str], limit: int) -> list[Pending]:
+    """The printings whose rows the pack lacks, at most `limit` of them (0 = no limit)."""
+    missing = [item for item in printings if item.printing_id not in have]
+    return missing[:limit] if limit > 0 else missing
+
+
+def download_chunk(
+    chunk: list[Pending],
+    download: Callable[[str], Image.Image] = download_image,
+    workers: int = DOWNLOAD_WORKERS,
+) -> tuple[list[Image.Image], list[str]]:
+    """Download a chunk's images a few at a time; the images and ids that came back, aligned.
+
+    A single bad image must not fail the night, so failures are logged and skipped.
+    """
+
+    def fetch(item: Pending) -> Image.Image | None:
+        try:
+            return download(item.image_url)
+        except Exception as error:
+            LOG.warning("skipping %s: %s", item.printing_id, error)
+            return None
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        fetched = list(pool.map(fetch, chunk))
+
+    images = [image for image in fetched if image is not None]
+    ids = [item.printing_id for item, image in zip(chunk, fetched) if image is not None]
+    return images, ids
+
+
+def fingerprint_missing(
+    missing: list[Pending],
+    pack: IndexPack,
+    *,
+    chunk_size: int = CHUNK_SIZE,
+    download: Callable[[str], Image.Image] = download_image,
+    embed: Callable[[list[Image.Image]], np.ndarray] = embed_images,
+    on_chunk: Callable[[IndexPack, list[str]], None] | None = None,
+) -> IndexPack:
+    """Embed the missing printings chunk by chunk, growing `pack`.
+
+    `on_chunk(pack, ids)` runs after each chunk with the whole pack so far, which
+    is where it is saved and uploaded: a run that dies part-way keeps what it did.
+    """
+    for start in range(0, len(missing), chunk_size):
+        chunk = missing[start : start + chunk_size]
+        images, ids = download_chunk(chunk, download)
+        LOG.info("chunk %d-%d: %d of %d images fetched", start, start + len(chunk), len(images), len(chunk))
+        if not images:
+            continue
+        pack = append_rows(pack, embed(images), ids)
+        if on_chunk is not None:
+            on_chunk(pack, ids)
+    return pack
 
 
 def report_done(worker_url: str, token: str, game: str, version: str, ids: list[str], key: str) -> None:
@@ -131,7 +257,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="catalog version this index belongs to; taken from the manifest when omitted",
     )
-    parser.add_argument("--limit", type=int, default=2000)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="embed at most this many missing printings this run (0 = all of them)",
+    )
     parser.add_argument("--work-dir", type=Path, default=Path("build"))
     parser.add_argument("--dry-run", action="store_true", help="skip the upload and the callback")
     args = parser.parse_args(argv)
@@ -146,48 +277,43 @@ def main(argv: list[str] | None = None) -> int:
 
     version = args.version or current_version(worker_url, args.game)
     if not version:
-        LOG.error("no catalog version published for %s yet", args.game)
-        return 1
-
-    pending = fetch_pending(worker_url, token, args.game, args.limit)
-    LOG.info("%d printings need a fingerprint", len(pending))
-    if not pending:
+        # A game the Worker has not imported yet is not a failure: there is simply
+        # nothing to fingerprint. Failing here would also stop the games after it.
+        LOG.info("no catalog version published for %s yet — nothing to do", args.game)
         return 0
-
-    images: list[Image.Image] = []
-    ids: list[str] = []
-    for item in pending:
-        try:
-            images.append(download_image(item.image_url))
-            ids.append(item.printing_id)
-        except Exception as error:  # a single bad image must not fail the night
-            LOG.warning("skipping %s: %s", item.printing_id, error)
-
-    if not images:
-        # We got the pending list fine but none of its images could be fetched.
-        # In practice this is the steady state once a game is fully fingerprinted:
-        # the only rows left are ones whose source image the CDN permanently
-        # blocks (HTTP 403), so there is genuinely nothing to embed. Treat it as a
-        # no-op success rather than failing the nightly run every night forever.
-        LOG.info("no fetchable images among %d pending (all unavailable) — nothing to do", len(pending))
-        return 0
-
-    LOG.info("embedding %d images", len(images))
-    vectors = embed_images(images)
 
     pack_path = args.work_dir / f"{args.game}-{version}.bin"
-    updated = append_rows(load_existing(pack_path), vectors, ids)
-    write_pack(pack_path, updated.matrix, updated.ids, half=True)
-    LOG.info("pack now holds %d rows", updated.matrix.shape[0])
+    pack = load_existing(pack_path)
+    if not args.dry_run:
+        # The pack in R2 is what the app downloads, so it is what we grow.
+        pack = download_base_pack(args.game, version, pack_path) or pack
 
-    if args.dry_run:
-        LOG.info("dry run: not uploading")
+    printings = fetch_printings(worker_url, token, args.game)
+    missing = select_missing(printings, set(pack.ids), args.limit)
+    LOG.info(
+        "%d printings with images, %d already in the pack, %d to embed",
+        len(printings),
+        len(pack.ids),
+        len(missing),
+    )
+    if not missing:
         return 0
 
     key = f"games/{args.game}/index-{version}.bin"
-    upload_to_r2(pack_path, key)
-    upload_to_r2(pack_path.with_suffix(".ids"), f"games/{args.game}/index-{version}.ids")
-    report_done(worker_url, token, args.game, version, ids, key)
+
+    def save(grown: IndexPack, ids: list[str]) -> None:
+        write_pack(pack_path, grown.matrix, grown.ids, half=True)
+        LOG.info("pack now holds %d rows", grown.matrix.shape[0])
+        if args.dry_run:
+            return
+        upload_to_r2(pack_path, key)
+        upload_to_r2(pack_path.with_suffix(".ids"), key.replace(".bin", ".ids"))
+        report_done(worker_url, token, args.game, version, ids, key)
+
+    final = fingerprint_missing(missing, pack, on_chunk=save)
+    if final is pack:
+        # Every image was unavailable (the CDN refuses some permanently with a 403).
+        LOG.info("no fetchable images among %d missing — nothing to do", len(missing))
     LOG.info("done")
     return 0
 

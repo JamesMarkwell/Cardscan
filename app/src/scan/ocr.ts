@@ -23,7 +23,9 @@ export interface OcrProvider {
 /** Normalised (left, top, width, height) of the strip worth reading, per game. */
 export const OCR_REGIONS: Record<GameId, { left: number; top: number; width: number; height: number }> = {
   pokemon: { left: 0.0, top: 0.88, width: 1.0, height: 0.12 },
-  onepiece: { left: 0.45, top: 0.86, width: 0.55, height: 0.14 },
+  // Full width: the serial sits bottom-right, and the card's name — which
+  // corroborates a serial misread by a digit — sits along the bottom-left.
+  onepiece: { left: 0.0, top: 0.85, width: 1.0, height: 0.15 },
   mtg: { left: 0.0, top: 0.86, width: 0.6, height: 0.14 },
   yugioh: { left: 0.0, top: 0.52, width: 1.0, height: 0.12 },
   lorcana: { left: 0.0, top: 0.88, width: 0.5, height: 0.12 },

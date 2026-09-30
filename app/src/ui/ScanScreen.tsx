@@ -1,24 +1,56 @@
 /**
- * Camera screen: live preview with a manual shutter.
+ * Camera screen: live preview, a Scan button, and optional auto-scan.
  *
- * Uses react-native-vision-camera. The preview renders natively and streams
- * continuously (cheap, off the JS thread). Scanning is manual: the user frames a
- * card and taps Scan, which captures one still and runs the identify pipeline on
- * it. Continuous live scanning streamed every camera frame to the JS thread and
- * froze the UI (the tab bar and chips live on that thread); a single capture on
- * demand does the heavy work once, so the rest of the UI stays responsive.
+ * Uses react-native-vision-camera. Either way, a scan is one grabbed camera
+ * frame run through the identify pipeline. The Scan button grabs on demand.
+ * Auto-scan grabs when the picture has been held still and is a new scene
+ * (autoScan.ts decides, from a tiny thumbnail kept on the camera thread), so
+ * holding a card steady scans it and moving to the next card scans that too.
+ *
+ * How we get the pixels is the whole story of this file. On this build every
+ * still-photo decode path hangs: nitro-image and expo-image-manipulator (async
+ * or sync) never return, and decoding the photo's JPEG bytes in pure JS with
+ * jpeg-js is too slow even at 720p (it froze on "Decoding 1280×720…"). What does
+ * work here is the camera's *frame output* — raw RGB buffers delivered on the
+ * frame-processor worklet thread, never encoded, the same mechanism the old live
+ * scanner used. Live scanning froze the UI only because it marshalled every
+ * frame to the JS thread; here the installed worklet discards every frame for
+ * free until the user taps Scan, at which point React state swaps in a worklet
+ * that copies exactly one frame's pixels over. So there is no JPEG, no native
+ * image library, no per-frame JS work, and no cross-thread flag: the worklet
+ * itself is the switch.
  */
 import * as Haptics from 'expo-haptics';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
-import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput, usePreviewOutput } from 'react-native-vision-camera';
+import { Camera, useCameraDevice, useCameraPermission, useFrameOutput, usePreviewOutput } from 'react-native-vision-camera';
+import type { Frame } from 'react-native-vision-camera';
+import { runOnJS } from 'react-native-worklets';
 import { GAMES, GameId } from '../data/types';
+import { crumb, readCrumbs } from '../debug/breadcrumbs';
+import {
+  AutoScanState,
+  createAutoScanState,
+  sampleThumbnail,
+  shouldSample,
+  stepAutoScan,
+} from '../scan/autoScan';
+import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
-// Still-capture resolution. The pipeline downscales to its working width anyway,
-// so a modest photo keeps the capture and decode fast.
-const PHOTO_RESOLUTION = { width: 1280, height: 720 };
+// Frame size. Detection (384px) and the picture match (448px) would be fine on
+// far less, but the printed serial is only a couple of millimetres tall: at
+// ~1000px it is about 9px high and digits get misread (a "17" came out as "12"),
+// so ask for a full-HD frame. The extra cost is one longer pixel copy per scan;
+// everything downstream resamples to a fixed size.
+const FRAME_RESOLUTION = { width: 1920, height: 1080 };
+// Frames stream continuously but the worklet discards them for free until a
+// capture is requested, so a low rate is plenty and keeps power/heat down.
+const CAPTURE_FPS = 10;
+// If the camera hasn't delivered a frame this long after a tap, give up rather
+// than spin forever (e.g. the stream stalled).
+const CAPTURE_TIMEOUT_MS = 6000;
 
 // What each pipeline rejection reason means for the person holding the phone.
 const STATUS_TEXT: Record<string, string> = {
@@ -31,6 +63,55 @@ const STATUS_TEXT: Record<string, string> = {
 };
 
 const IDLE_STATUS = 'Point at a card and tap Scan';
+const AUTO_IDLE_STATUS = 'Hold a card steady to scan it';
+
+/**
+ * Copy a frame's pixels into a compact RGBA buffer, in the right channel order.
+ * Runs on the camera thread. `meta` describes the frame, for the scan log.
+ */
+function copyFrameToRgba(frame: Frame): { out: Uint8Array; width: number; height: number; meta: string } {
+  'worklet';
+  const plane = frame.getPlanes()[0];
+  if (plane == null) throw new Error('frame has no pixel plane');
+  const width = plane.width;
+  const height = plane.height;
+  const bytesPerRow = plane.bytesPerRow;
+  const src = new Uint8Array(plane.getPixelBuffer());
+  // 'rgb' is 3 bytes/pixel, but some pipelines negotiate a 4-byte layout; derive
+  // it from the row stride and copy into compact RGBA.
+  const channels = Math.max(3, Math.round(bytesPerRow / width));
+  // The channel order is not always RGB: the camera often hands over BGRA
+  // ('rgb-bgra-8-bit'). Reading it as RGB swaps red and blue, and the embedder
+  // scores a red/blue-swapped card ~0.74 against ~0.91.
+  const isBgra = frame.pixelFormat === 'rgb-bgra-8-bit';
+  const redAt = isBgra ? 2 : 0;
+  const blueAt = isBgra ? 0 : 2;
+  const out = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    const row = y * bytesPerRow;
+    for (let x = 0; x < width; x += 1) {
+      const s = row + x * channels;
+      const d = (y * width + x) * 4;
+      out[d] = src[s + redAt];
+      out[d + 1] = src[s + 1];
+      out[d + 2] = src[s + blueAt];
+      out[d + 3] = 255;
+    }
+  }
+  const meta = `format=${frame.pixelFormat} orientation=${frame.orientation} mirrored=${frame.isMirrored} ${width}x${height} stride=${bytesPerRow} channels=${channels}`;
+  return { out, width, height, meta };
+}
+
+/** A tiny brightness thumbnail of a frame, for spotting when the picture is still. */
+function thumbnailOfFrame(frame: Frame): number[] {
+  'worklet';
+  const plane = frame.getPlanes()[0];
+  if (plane == null) throw new Error('frame has no pixel plane');
+  const bytesPerRow = plane.bytesPerRow;
+  const channels = Math.max(3, Math.round(bytesPerRow / plane.width));
+  // Green is the second byte of a pixel in RGB, RGBA and BGRA alike.
+  return sampleThumbnail(new Uint8Array(plane.getPixelBuffer()), plane.width, plane.height, bytesPerRow, channels, 1);
+}
 
 interface Props {
   service: ScanService;
@@ -41,35 +122,114 @@ interface Props {
   syncing?: boolean;
   /** Hide the shutter while something else is on top (e.g. the result sheet). */
   paused?: boolean;
+  /** Scan by itself when a card is held steady, as well as on the Scan button. */
+  autoScan: boolean;
+  onAutoScanChange: (on: boolean) => void;
 }
 
-export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady, syncing, paused }: Props) {
+export function ScanScreen({
+  service,
+  gameId,
+  onGameChange,
+  onResult,
+  indexReady,
+  syncing,
+  paused,
+  autoScan,
+  onAutoScanChange,
+}: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
-  // The live preview only renders when a preview output is connected, and the
-  // photo output is what lets us capture a still to scan.
+  // The live preview only renders when a preview output is connected; the frame
+  // output is what lets us grab a still to scan.
   const previewOutput = usePreviewOutput();
-  const photoOutput = usePhotoOutput({
-    targetResolution: PHOTO_RESOLUTION,
-    qualityPrioritization: 'balanced',
-    quality: 0.7,
-  });
   const [status, setStatus] = useState('Starting camera');
   const [modelsReady, setModelsReady] = useState(false);
   const [scanning, setScanning] = useState(false);
+  // Which frame worklet is installed on the camera thread. false: discard every
+  // frame. true: grab one. It is plain React state — the hook re-sends the
+  // worklet to the camera thread whenever it changes — so there is no shared
+  // cross-thread flag to get wrong.
+  const [grabbing, setGrabbing] = useState(false);
+  // Tap the status bar to show the step log (survives a crash — see breadcrumbs).
+  // Open by default for now, so after a crash and restart the previous run's last
+  // steps are on screen straight away.
+  const [showLog, setShowLog] = useState(true);
+  const [logLines, setLogLines] = useState<string[]>([]);
+  // Seconds since the current scan began, so a slow step can be told apart from
+  // a frozen app (the counter keeps ticking only while the JS thread is free).
+  const [elapsed, setElapsed] = useState(0);
 
   const mounted = useRef(true);
+  // True from the moment Scan is tapped until we've consumed one frame. Guards
+  // against a stray frame being processed and against double-taps.
+  const awaitingCapture = useRef(false);
+  const watchdog = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Read by callbacks that outlive a render (camera frames arrive on their own
+  // schedule): whether auto-scan is on, and whether a scan is being processed.
+  const autoRef = useRef(autoScan);
+  const busyRef = useRef(false);
+  useEffect(() => {
+    autoRef.current = autoScan;
+  }, [autoScan]);
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      if (watchdog.current) clearTimeout(watchdog.current);
     };
   }, []);
 
   useEffect(() => {
     if (!hasPermission) void requestPermission();
   }, [hasPermission, requestPermission]);
+
+  // Point the pipeline's step logging at the crash-surviving log.
+  useEffect(() => {
+    service.pipeline.trace = crumb;
+    return () => {
+      service.pipeline.trace = undefined;
+    };
+  }, [service]);
+
+  // Confirms the render that installs (or removes) the grab worklet committed.
+  useEffect(() => {
+    crumb(`render: grabbing=${grabbing}`);
+  }, [grabbing]);
+
+  // While the log is open, keep it live so the steps of a running scan appear as
+  // they are written instead of showing a stale snapshot.
+  useEffect(() => {
+    if (!showLog) return undefined;
+    const refresh = () => {
+      void readCrumbs(16).then((lines) => mounted.current && setLogLines(lines));
+    };
+    refresh();
+    const id = setInterval(refresh, 700);
+    return () => clearInterval(id);
+  }, [showLog]);
+
+  useEffect(() => {
+    if (!scanning) {
+      setElapsed(0);
+      return undefined;
+    }
+    const started = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [scanning]);
+
+  const toggleLog = () => setShowLog((open) => !open);
+
+  // Keep the idle prompt in step with the Auto setting (only while nothing else
+  // is being said: a scan in progress or an outcome on screen is left alone).
+  useEffect(() => {
+    setStatus((current) => {
+      if (current === IDLE_STATUS || current === AUTO_IDLE_STATUS) return autoScan ? AUTO_IDLE_STATUS : IDLE_STATUS;
+      return current;
+    });
+  }, [autoScan]);
 
   useEffect(() => {
     let cancelled = false;
@@ -78,7 +238,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       .then(() => {
         if (!cancelled) {
           setModelsReady(true);
-          setStatus(IDLE_STATUS);
+          setStatus(autoRef.current ? AUTO_IDLE_STATUS : IDLE_STATUS);
         }
       })
       .catch((error: Error) => {
@@ -91,39 +251,198 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
 
   // Scanning needs the models loaded and a settled catalogue.
   const ready = modelsReady && hasPermission && !paused && !syncing;
-  // The Camera streams the preview whenever we have permission and no result
-  // sheet is up. The preview does not need the models or the catalogue, so it
-  // stays live during "Updating catalogue…" instead of showing black.
+  // The Camera streams whenever we have permission and no result sheet is up.
   const cameraActive = hasPermission && !paused;
 
-  // Capture one still and identify it — the manual shutter.
-  const captureAndScan = async () => {
-    if (!ready || scanning) return;
-    setScanning(true);
-    setStatus('Scanning…');
-    try {
-      const file = await photoOutput.capturePhotoToFile({ enableShutterSound: false }, {});
-      if (!mounted.current) return;
+  const idleStatus = useCallback(() => (autoRef.current ? AUTO_IDLE_STATUS : IDLE_STATUS), []);
 
-      const { result, status: next } = await service.scanOnce(`file://${file.filePath}`);
-      if (!mounted.current) return;
+  /**
+   * Identify one grabbed frame and show the outcome. `origin` decides how a miss
+   * is worded: after a tap it is guidance, but auto-scan tries whenever a picture
+   * settles, so "no card in view" is just the normal state, not a complaint.
+   */
+  const processFrame = useCallback(
+    (frame: RgbaImage, origin: 'manual' | 'auto') => {
+      busyRef.current = true;
+      setScanning(true);
+      crumb(`js: ${origin} frame received ${frame.width}x${frame.height}, ${frame.data.length} bytes`);
+      setStatus(origin === 'auto' ? 'Card steady — scanning…' : `Got frame ${frame.width}×${frame.height}…`);
+      void service
+        .scanImageOnce(frame, (stage) => {
+          if (mounted.current) setStatus(stage);
+        })
+        .then(({ result, status: next }) => {
+          crumb(`js: scan finished status=${next} printing=${result?.printing?.id ?? 'none'}`);
+          if (!mounted.current) return;
+          if (result && result.printing) {
+            void Haptics.notificationAsync(
+              result.confidence.tier === 'high'
+                ? Haptics.NotificationFeedbackType.Success
+                : Haptics.NotificationFeedbackType.Warning,
+            );
+            onResult(result);
+            setStatus(idleStatus());
+          } else if (result) {
+            setStatus(origin === 'auto' ? 'No match — try another card, or tap Scan' : 'No match — try again, filling the frame');
+          } else if (origin === 'auto' && next === 'no-card') {
+            setStatus(AUTO_IDLE_STATUS);
+          } else {
+            setStatus(STATUS_TEXT[next] ?? next);
+          }
+        })
+        .catch((error: Error) => {
+          crumb(`js: scan error ${error.message}`);
+          if (mounted.current) setStatus(`Scan error: ${error.message}`);
+        })
+        .finally(() => {
+          busyRef.current = false;
+          if (mounted.current) setScanning(false);
+        });
+    },
+    [idleStatus, onResult, service],
+  );
 
-      if (result) {
-        void Haptics.notificationAsync(
-          result.confidence.tier === 'high'
-            ? Haptics.NotificationFeedbackType.Success
-            : Haptics.NotificationFeedbackType.Warning,
-        );
-        onResult(result);
-        setStatus(IDLE_STATUS);
-      } else {
-        setStatus(STATUS_TEXT[next] ?? next);
+  // A frame grabbed for a tap on Scan. Guarded so only the frame asked for is used.
+  const onCapturedFrame = useCallback(
+    (data: Uint8Array, width: number, height: number) => {
+      if (!awaitingCapture.current || !mounted.current) return;
+      awaitingCapture.current = false;
+      // Swap back to the discard worklet so no further frames are copied.
+      setGrabbing(false);
+      if (watchdog.current) {
+        clearTimeout(watchdog.current);
+        watchdog.current = null;
       }
-    } catch (error) {
-      if (mounted.current) setStatus((error as Error).message);
-    } finally {
-      if (mounted.current) setScanning(false);
+      processFrame({ data, width, height }, 'manual');
+    },
+    [processFrame],
+  );
+
+  // A frame the camera thread grabbed because the picture had been still for a
+  // moment (see autoScan.ts). It may arrive while a scan is already under way, or
+  // after auto-scan was switched off; either way it is dropped.
+  const onAutoFrame = useCallback(
+    (data: Uint8Array, width: number, height: number) => {
+      if (!mounted.current || !autoRef.current || busyRef.current || awaitingCapture.current) return;
+      processFrame({ data, width, height }, 'auto');
+    },
+    [processFrame],
+  );
+
+  // The grab worklet threw. Surface the reason on screen and reset the shutter,
+  // so a failure in the camera thread is visible rather than a silent stall.
+  const onGrabError = useCallback((message: string) => {
+    crumb(`js: grab error ${message}`);
+    if (!awaitingCapture.current || !mounted.current) return;
+    awaitingCapture.current = false;
+    setGrabbing(false);
+    if (watchdog.current) {
+      clearTimeout(watchdog.current);
+      watchdog.current = null;
     }
+    setScanning(false);
+    setStatus(`Frame grab failed: ${message}`);
+  }, []);
+
+  // The auto-scan watcher threw. Log it and carry on; it will try again.
+  const onAutoError = useCallback((message: string) => {
+    crumb(`js: auto-scan watcher error ${message}`);
+  }, []);
+
+  // Auto-scan watches whenever a scan could start and none is running or asked for.
+  const watching = autoScan && ready && !scanning && !grabbing;
+
+  const frameOutput = useFrameOutput({
+    pixelFormat: 'rgb',
+    targetResolution: FRAME_RESOLUTION,
+    // Hand us a display-upright buffer so the card is the right way up for the
+    // detector, regardless of sensor orientation.
+    enablePhysicalBufferRotation: true,
+    // Three modes, chosen by React state (the hook re-sends the worklet to the
+    // camera thread when it changes, so no cross-thread flag is needed):
+    //  - grabbing: copy exactly one frame over to JS (the Scan button);
+    //  - watching: keep a tiny thumbnail of each sampled frame and, once the
+    //    picture has held still and is a new scene, copy one frame over
+    //    (auto-scan — nothing else ever crosses to JS, which is what froze the
+    //    old live scanner);
+    //  - otherwise: throw every frame away for free.
+    onFrame: grabbing
+      ? (frame) => {
+          'worklet';
+          let picture: { out: Uint8Array; width: number; height: number; meta: string } | null = null;
+          let failure: string | null = null;
+          runOnJS(crumb)('worklet: grab start');
+          try {
+            picture = copyFrameToRgba(frame);
+            runOnJS(crumb)(`worklet: ${picture.meta}`);
+          } catch (error) {
+            failure = String(error);
+          }
+          frame.dispose();
+          if (failure != null || picture == null) {
+            runOnJS(onGrabError)(failure ?? 'no pixels');
+          } else {
+            runOnJS(crumb)('worklet: copied, handing to JS');
+            runOnJS(onCapturedFrame)(picture.out, picture.width, picture.height);
+          }
+        }
+      : watching
+        ? (frame) => {
+            'worklet';
+            // State that must outlive a frame lives on this thread's global, which
+            // persists across frames and across re-installs of this worklet.
+            const scope = globalThis as unknown as { __cardscanAuto?: AutoScanState };
+            if (scope.__cardscanAuto == null) scope.__cardscanAuto = createAutoScanState();
+            const state = scope.__cardscanAuto;
+            const now = Date.now();
+            if (!shouldSample(state, now)) {
+              frame.dispose();
+              return;
+            }
+            // Even a failed sample counts as one, so a fault cannot spin every frame.
+            state.lastSampleAt = now;
+
+            let picture: { out: Uint8Array; width: number; height: number; meta: string } | null = null;
+            let failure: string | null = null;
+            try {
+              const step = stepAutoScan(state, thumbnailOfFrame(frame), now);
+              if (step.trigger) {
+                picture = copyFrameToRgba(frame);
+                runOnJS(crumb)(`worklet: auto trigger still=${step.still.toFixed(1)} changed=${step.changed.toFixed(1)} ${picture.meta}`);
+              }
+            } catch (error) {
+              failure = String(error);
+            }
+            frame.dispose();
+            if (failure != null) runOnJS(onAutoError)(failure);
+            else if (picture != null) runOnJS(onAutoFrame)(picture.out, picture.width, picture.height);
+          }
+        : (frame) => {
+            'worklet';
+            frame.dispose();
+          },
+  });
+
+  // The manual shutter: install the grab worklet so the next frame is captured.
+  const requestScan = () => {
+    if (!ready || awaitingCapture.current || busyRef.current) return;
+    crumb('tap: scan requested');
+    awaitingCapture.current = true;
+    setScanning(true);
+    setStatus('Capturing…');
+    // Start the watchdog before anything that could throw, so the shutter can
+    // never be left spinning with nothing scheduled to reset it.
+    watchdog.current = setTimeout(() => {
+      if (!awaitingCapture.current) return;
+      crumb('watchdog: no frame in 6s');
+      awaitingCapture.current = false;
+      setGrabbing(false);
+      if (mounted.current) {
+        setScanning(false);
+        setStatus('No camera frame arrived in 6s — try again');
+      }
+    }, CAPTURE_TIMEOUT_MS);
+    setGrabbing(true);
   };
 
   if (!hasPermission) {
@@ -153,7 +472,8 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
         style={StyleSheet.absoluteFill}
         device={device}
         isActive={cameraActive}
-        outputs={[previewOutput, photoOutput]}
+        outputs={frameOutput ? [previewOutput, frameOutput] : [previewOutput]}
+        constraints={[{ fps: CAPTURE_FPS }]}
       />
 
       <View pointerEvents="none" style={styles.frameGuide} />
@@ -173,21 +493,50 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       </View>
 
       <View style={styles.controls}>
-        <View style={styles.statusBar}>
+        {showLog ? (
+          <View style={styles.logBox}>
+            {logLines.length === 0 ? (
+              <Text style={styles.logText}>No log yet.</Text>
+            ) : (
+              logLines.map((line, index) => (
+                <Text key={`${index}-${line}`} style={styles.logText}>
+                  {line}
+                </Text>
+              ))
+            )}
+          </View>
+        ) : null}
+        <Pressable style={styles.statusBar} onPress={toggleLog}>
           {!modelsReady ? <ActivityIndicator color={theme.accent} /> : null}
-          <Text style={styles.statusText}>{status}</Text>
+          <Text style={styles.statusText}>
+            {status}
+            {scanning && elapsed > 0 ? ` (${elapsed}s)` : ''}
+          </Text>
           {syncing ? (
             <Text style={styles.warning}>Updating catalogue…</Text>
           ) : !indexReady ? (
             <Text style={styles.warning}>No card index yet — it downloads on first sync.</Text>
           ) : null}
-        </View>
+          <Text style={styles.logHint}>{showLog ? 'tap to hide log' : 'tap for log'}</Text>
+        </Pressable>
+
+        <Pressable
+          accessibilityRole="switch"
+          accessibilityState={{ checked: autoScan }}
+          accessibilityLabel="Auto-scan"
+          onPress={() => onAutoScanChange(!autoScan)}
+          style={[styles.autoPill, autoScan && styles.autoPillOn]}
+        >
+          <Text style={[styles.autoPillText, autoScan && styles.autoPillTextOn]}>
+            {autoScan ? 'Auto-scan on — hold a card steady' : 'Auto-scan off'}
+          </Text>
+        </Pressable>
 
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Scan card"
           disabled={!ready || scanning}
-          onPress={() => void captureAndScan()}
+          onPress={requestScan}
           style={[styles.shutter, (!ready || scanning) && styles.shutterDisabled]}
         >
           {scanning ? (
@@ -270,6 +619,27 @@ const styles = StyleSheet.create({
   },
   statusText: { color: theme.text, fontSize: 15, textAlign: 'center' },
   warning: { color: theme.check, fontSize: 12, textAlign: 'center' },
+  logHint: { color: theme.textMuted, fontSize: 10, textAlign: 'center' },
+  autoPill: {
+    alignSelf: 'center',
+    paddingHorizontal: theme.spacing(1.5),
+    paddingVertical: theme.spacing(0.75),
+    borderRadius: 999,
+    backgroundColor: 'rgba(11,14,20,0.75)',
+    borderWidth: 1,
+    borderColor: theme.border,
+  },
+  autoPillOn: { borderColor: theme.accent },
+  autoPillText: { color: theme.textMuted, fontSize: 12 },
+  autoPillTextOn: { color: theme.text },
+  logBox: {
+    alignSelf: 'stretch',
+    gap: 1,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    borderRadius: theme.radius,
+    padding: theme.spacing(1),
+  },
+  logText: { color: '#9fe870', fontSize: 10, fontFamily: 'monospace' },
   shutter: {
     minWidth: 200,
     alignItems: 'center',

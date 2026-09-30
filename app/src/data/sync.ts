@@ -8,7 +8,7 @@
  */
 import * as SQLite from 'expo-sqlite';
 import { openDatabase } from './db';
-import { saveIndexPack } from './indexPack';
+import { indexPackNeedsDownload, saveIndexPack } from './indexPack';
 import { GameId } from './types';
 
 export interface GameManifest {
@@ -217,41 +217,53 @@ async function runSyncGame(
   onProgress?: (progress: SyncProgress) => void,
 ): Promise<boolean> {
   const installed = await localVersion(game.game);
-  if (installed === game.version) return false;
+  const catalogCurrent = installed === game.version;
 
-  const chain = deltaPath(game, installed);
+  if (!catalogCurrent) {
+    const chain = deltaPath(game, installed);
 
-  if (chain.length > 0) {
-    let done = 0;
-    for (const delta of chain) {
-      const response = await fetch(delta.url);
-      if (!response.ok) throw new SyncError(`Delta ${delta.from}->${delta.to} failed: ${response.status}`);
+    if (chain.length > 0) {
+      let done = 0;
+      for (const delta of chain) {
+        const response = await fetch(delta.url);
+        if (!response.ok) throw new SyncError(`Delta ${delta.from}->${delta.to} failed: ${response.status}`);
+        await applyDelta((await response.json()) as CatalogDelta);
+        done += 1;
+        onProgress?.({ stage: 'delta', game: game.game, ratio: done / chain.length });
+      }
+    } else {
+      // No usable delta chain (fresh install, or too far behind) — take the lot.
+      onProgress?.({ stage: 'catalog', game: game.game, ratio: 0 });
+      const response = await fetch(game.catalogUrl);
+      if (!response.ok) throw new SyncError(`Catalog download failed: ${response.status}`);
       await applyDelta((await response.json()) as CatalogDelta);
-      done += 1;
-      onProgress?.({ stage: 'delta', game: game.game, ratio: done / chain.length });
+      onProgress?.({ stage: 'catalog', game: game.game, ratio: 1 });
     }
-  } else {
-    // No usable delta chain (fresh install, or too far behind) — take the lot.
-    onProgress?.({ stage: 'catalog', game: game.game, ratio: 0 });
-    const response = await fetch(game.catalogUrl);
-    if (!response.ok) throw new SyncError(`Catalog download failed: ${response.status}`);
-    await applyDelta((await response.json()) as CatalogDelta);
-    onProgress?.({ stage: 'catalog', game: game.game, ratio: 1 });
   }
 
-  // The scan index is published by the fingerprint job, after and separately
-  // from the catalog. It may not exist yet, so a missing or failed index must
-  // not fail an otherwise-good catalog sync — scanning simply waits for it.
-  if (game.indexUrl && game.indexIdsUrl) {
+  // Make sure the scan index for this version is on the device. It is published
+  // by the fingerprint job after and separately from the catalog, so a version
+  // that synced before its index existed — or before the manifest advertised one
+  // — still needs it, even when the catalog itself is already up to date. Only
+  // download when it's advertised and missing or changed on the server (the
+  // fingerprint job grows a version's pack in place); a missing or failed index
+  // must never fail an otherwise-good catalog sync.
+  let indexFetched = false;
+  if (game.indexUrl && game.indexIdsUrl && (await indexPackNeedsDownload(game.game, game.version, game.indexUrl))) {
     onProgress?.({ stage: 'index', game: game.game, ratio: 0 });
     try {
       await saveIndexPack(game.game, game.version, game.indexUrl, game.indexIdsUrl);
+      indexFetched = true;
       onProgress?.({ stage: 'index', game: game.game, ratio: 1 });
     } catch {
-      // Index not available yet; the catalog is still synced below.
+      // Index not available yet; scanning simply waits for a later sync.
     }
   }
 
-  await setVersion(game.game, game.version, game.printingsCount);
-  return true;
+  if (!catalogCurrent) {
+    await setVersion(game.game, game.version, game.printingsCount);
+  }
+  // "Changed" drives the app to reload the index; a freshly fetched index counts
+  // even when the catalog version itself did not move.
+  return !catalogCurrent || indexFetched;
 }

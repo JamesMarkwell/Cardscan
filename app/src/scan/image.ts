@@ -73,6 +73,50 @@ export function dewarp(image: RgbaImage, corners: Point[], size = EMBEDDER_SIZE)
   return { data: out, width: size, height: size };
 }
 
+/**
+ * Cut one rectangle of the card out of the frame, flattened and at its own
+ * proportions.
+ *
+ * `region` is in the card's own coordinates — (0, 0) its top-left corner and
+ * (1, 1) its bottom-right, as the corners are ordered TL, TR, BR, BL. Sampling
+ * straight from the frame through the card's homography, rather than cutting the
+ * region out of the 448px square, keeps small print like a serial number
+ * legible: the square is squashed and has already been resampled once.
+ */
+export function dewarpRegion(
+  image: RgbaImage,
+  corners: Point[],
+  region: { left: number; top: number; width: number; height: number },
+  outWidth: number,
+  outHeight: number,
+): RgbaImage {
+  const sourcePoints: Point[] = corners.map(([x, y]) => [x * image.width, y * image.height]);
+  const cardSquare: Point[] = [
+    [0, 0],
+    [1, 0],
+    [1, 1],
+    [0, 1],
+  ];
+  // Card coordinates -> frame pixels.
+  const toFrame = computeHomography(cardSquare, sourcePoints);
+  const out = new Uint8Array(outWidth * outHeight * 4);
+
+  for (let y = 0; y < outHeight; y += 1) {
+    const v = region.top + ((y + 0.5) / outHeight) * region.height;
+    for (let x = 0; x < outWidth; x += 1) {
+      const u = region.left + ((x + 0.5) / outWidth) * region.width;
+      const [sx, sy] = applyHomography(toFrame, u, v);
+      const offset = (y * outWidth + x) * 4;
+      out[offset] = sampleBilinear(image.data, image.width, image.height, sx, sy, 0);
+      out[offset + 1] = sampleBilinear(image.data, image.width, image.height, sx, sy, 1);
+      out[offset + 2] = sampleBilinear(image.data, image.width, image.height, sx, sy, 2);
+      out[offset + 3] = 255;
+    }
+  }
+
+  return { data: out, width: outWidth, height: outHeight };
+}
+
 /** Rotate an RGBA image 180 degrees, used for the upside-down retry. */
 export function rotate180(image: RgbaImage): RgbaImage {
   const { width, height, data } = image;
@@ -89,6 +133,31 @@ export function rotate180(image: RgbaImage): RgbaImage {
   }
 
   return { data: out, width, height };
+}
+
+/**
+ * Rotate an RGBA image a quarter turn — clockwise by default. Used to try the
+ * orientations of a card crop the camera may have delivered sideways.
+ */
+export function rotate90(image: RgbaImage, clockwise = true): RgbaImage {
+  const { width, height, data } = image;
+  const out = new Uint8Array(width * height * 4);
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const src = (y * width + x) * 4;
+      // Clockwise: (x, y) -> (height - 1 - y, x); counter-clockwise: (y, width - 1 - x).
+      const dstX = clockwise ? height - 1 - y : y;
+      const dstY = clockwise ? x : width - 1 - x;
+      const dst = (dstY * height + dstX) * 4;
+      out[dst] = data[src];
+      out[dst + 1] = data[src + 1];
+      out[dst + 2] = data[src + 2];
+      out[dst + 3] = data[src + 3];
+    }
+  }
+
+  return { data: out, width: height, height: width };
 }
 
 /** Pack an RGBA square into NCHW float32 with ImageNet normalisation. */

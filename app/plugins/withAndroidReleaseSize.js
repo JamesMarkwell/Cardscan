@@ -47,6 +47,12 @@ const PROGUARD_RULES = `
 # Added by plugins/withAndroidReleaseSize.js
 -keep class ai.onnxruntime.** { *; }
 -dontwarn ai.onnxruntime.**
+
+# ML Kit text recognition (the serial-number reader). Its native pipeline looks
+# classes up by name, like ONNX Runtime's, so a shrunk release build must keep them.
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.internal.mlkit_vision_text_common.** { *; }
+-dontwarn com.google.mlkit.**
 `;
 
 /** Gradle properties the generated build.gradle already reads. */
@@ -102,7 +108,7 @@ const withAndroidReleaseSize = (config) => {
         'proguard-rules.pro',
       );
       const existing = fs.existsSync(rulesPath) ? fs.readFileSync(rulesPath, 'utf8') : '';
-      if (!existing.includes('ai.onnxruntime')) {
+      if (!existing.includes('# Added by plugins/withAndroidReleaseSize.js')) {
         fs.writeFileSync(rulesPath, `${existing.trimEnd()}\n${PROGUARD_RULES}`);
       }
       return dangerousConfig;

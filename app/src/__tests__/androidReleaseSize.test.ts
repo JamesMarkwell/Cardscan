@@ -59,6 +59,10 @@ describe('proguard rules', () => {
   it('keeps the ONNX Runtime classes its JNI library resolves by name', () => {
     expect(plugin.PROGUARD_RULES).toContain('-keep class ai.onnxruntime.** { *; }');
   });
+
+  it('keeps the ML Kit classes the serial-number reader loads by name', () => {
+    expect(plugin.PROGUARD_RULES).toContain('-keep class com.google.mlkit.** { *; }');
+  });
 });
 
 describe('gradle properties', () => {

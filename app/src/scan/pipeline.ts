@@ -13,6 +13,7 @@ import {
   dewarp,
   laplacianVariance,
   rotate180,
+  rotate90,
   squashResize,
   toImageNetTensor,
 } from './image';
@@ -29,8 +30,14 @@ export interface Detection {
 }
 
 export interface ScanOptions {
-  /** Below this the frame is treated as "no card". */
+  /** Below this the frame is treated as "no card" (used with the presence head). */
   minCornerConfidence?: number;
+  /**
+   * Below this the frame is treated as "no card" (used with the sharpness head).
+   * Measured on the bundled model: about 0.01 with no card in view and 0.05-0.07
+   * with a card in frame, so this sits between the two.
+   */
+  minCardScore?: number;
   /** Fraction of the frame the card must fill. */
   minQuadArea?: number;
   /** Embed the 180-degree rotation too and keep the stronger match. */
@@ -40,16 +47,17 @@ export interface ScanOptions {
 
 const DEFAULTS: Required<ScanOptions> = {
   minCornerConfidence: 0.35,
+  minCardScore: 0.03,
   minQuadArea: 0.1,
   tryRotated: true,
   topK: 10,
 };
 
 // A confident upright cosine match. Above this we trust the upright reading and
-// skip the 180-degree retry — its embed re-runs toImageNetTensor (a ~600k-element
-// loop) and rotate180 (~800k) on the JS thread, doubling the per-frame cost the
-// index turns on. Only a weak upright match (an upside-down or not-yet-matched
-// card) is worth paying for the retry.
+// skip the other-orientation retries — each re-runs toImageNetTensor (a
+// ~600k-element loop) and a rotation on the JS thread. Only a weak upright match
+// (a sideways or upside-down card, or one that isn't indexed) is worth paying for
+// the retries.
 const ROTATION_RETRY_BELOW = 0.6;
 
 export interface FrameResult {
@@ -70,6 +78,10 @@ export class ScanPipeline {
 
   private detectorTensor = new Float32Array(3 * DETECTOR_SIZE * DETECTOR_SIZE);
   private embedderTensor = new Float32Array(3 * EMBEDDER_SIZE * EMBEDDER_SIZE);
+
+  /** Optional step logger. The app points this at its crash-surviving log so the
+   * last step reached is known if a scan takes the app down. */
+  trace: ((message: string) => void) | undefined;
 
   constructor(options: ScanOptions = {}) {
     this.options = { ...DEFAULTS, ...options };
@@ -105,13 +117,17 @@ export class ScanPipeline {
 
     // The detector was trained on squashed (aspect-ignoring) input, so its
     // normalised outputs map straight back onto the original frame.
+    this.trace?.(`detect: squash ${frame.width}x${frame.height} -> ${DETECTOR_SIZE}`);
     const squashed = squashResize(frame, DETECTOR_SIZE);
+    this.trace?.('detect: tensor');
     toImageNetTensor(squashed, DETECTOR_SIZE, this.detectorTensor);
 
     const inputName = this.detector.inputNames[0];
+    this.trace?.('detect: model run');
     const outputs = await this.detector.run({
       [inputName]: new Tensor('float32', this.detectorTensor, [1, 3, DETECTOR_SIZE, DETECTOR_SIZE]),
     });
+    this.trace?.('detect: model done');
 
     const names = this.detector.outputNames;
     const cornersRaw = Array.from(outputs[names[0]].data as Float32Array).slice(0, 8);
@@ -123,12 +139,18 @@ export class ScanPipeline {
       points.push([clamp01(cornersRaw[i]), clamp01(cornersRaw[i + 1])]);
     }
 
+    // Which head says "a card is here" matters. The bundled model's presence head
+    // reads a constant 1.0 for every input (flat grey, black and noise included),
+    // so it cannot tell a card from no card. The sharpness head does: about 0.01
+    // with nothing in view, 0.05-0.07 with a card in frame. Prefer it, against its
+    // own floor, and fall back to presence only if a model has no such head.
     const confidence = sharpness ?? sigmoid(presenceLogit);
+    const floor = sharpness !== null ? this.options.minCardScore : this.options.minCornerConfidence;
     return {
       corners: orderCorners(points, frame.width, frame.height),
       sharpness,
       confidence,
-      cardPresent: confidence >= this.options.minCornerConfidence,
+      cardPresent: confidence >= floor,
     };
   }
 
@@ -155,6 +177,7 @@ export class ScanPipeline {
 
     const detection = await this.detect(frame);
     timings.detectMs = Date.now() - started;
+    this.trace?.(`detect: done ${timings.detectMs}ms conf=${detection.confidence.toFixed(2)} present=${detection.cardPresent}`);
 
     const reject = (reason: string): FrameResult => ({
       detection,
@@ -170,28 +193,42 @@ export class ScanPipeline {
     if (quadCoverage(detection.corners) < this.options.minQuadArea) return reject('too-small');
 
     const dewarpStart = Date.now();
+    this.trace?.('dewarp: start');
     const crop = dewarp(frame, detection.corners, EMBEDDER_SIZE);
     timings.dewarpMs = Date.now() - dewarpStart;
+    this.trace?.(`dewarp: done ${timings.dewarpMs}ms`);
 
     const embedStart = Date.now();
+    this.trace?.('embed: start');
     let embedding = await this.embed(crop);
+    this.trace?.(`embed: done ${Date.now() - embedStart}ms, index=${this.index ? 'yes' : 'NO'}`);
     let candidates = this.index ? search(this.index, embedding, this.options.topK) : [];
+    this.trace?.(`search: done top=${candidates[0]?.score?.toFixed(3) ?? 'none'}`);
 
-    // Milo is sensitive to upside-down cards, so try the 180-degree rotation and
-    // keep whichever direction matched more strongly. Both the second embed's
-    // tensor packing and rotate180 run on the JS thread, so doing this on every
-    // frame doubles the per-frame cost the moment an index is loaded — enough to
-    // starve touch handling (the tab bar and game chips stop responding). Only
-    // pay for it when the upright match is weak, which is the only case it can
-    // change the answer: a confident upright card keeps the single-embed cost.
+    // Milo is sensitive to orientation: measured against the same card, a 180°
+    // turn scores ~0.40 and a quarter turn ~0.57, versus ~0.91 upright. The camera
+    // can hand over a sideways or upside-down buffer, so when the upright reading
+    // is weak try the other three orientations and keep the strongest. Each embed
+    // packs a ~600k-element tensor on the JS thread, so a confident upright card
+    // skips this and keeps the single-embed cost.
     const bestUpright = candidates[0]?.score ?? -Infinity;
     if (this.options.tryRotated && this.index && bestUpright < ROTATION_RETRY_BELOW) {
-      const rotatedEmbedding = await this.embed(rotate180(crop));
-      const rotatedCandidates = search(this.index, rotatedEmbedding, this.options.topK);
-      const bestRotated = rotatedCandidates[0]?.score ?? -Infinity;
-      if (bestRotated > bestUpright) {
-        embedding = rotatedEmbedding;
-        candidates = rotatedCandidates;
+      let best = bestUpright;
+      const variants: Array<[string, () => RgbaImage]> = [
+        ['180', () => rotate180(crop)],
+        ['90cw', () => rotate90(crop, true)],
+        ['90ccw', () => rotate90(crop, false)],
+      ];
+      for (const [label, make] of variants) {
+        const rotatedEmbedding = await this.embed(make());
+        const rotatedCandidates = search(this.index, rotatedEmbedding, this.options.topK);
+        const score = rotatedCandidates[0]?.score ?? -Infinity;
+        this.trace?.(`embed: rotation ${label} top=${score.toFixed(3)} (upright ${bestUpright.toFixed(3)})`);
+        if (score > best) {
+          best = score;
+          embedding = rotatedEmbedding;
+          candidates = rotatedCandidates;
+        }
       }
     }
     timings.embedMs = Date.now() - embedStart;
@@ -222,15 +259,17 @@ export function combineFrames(
 ): { candidates: Candidate[]; confidence: ConfidenceResult } {
   const usable = frames.filter((frame) => frame.candidates.length > 0);
   const candidates = voteAcrossFrames(usable.map((frame) => frame.candidates));
-  const sharpness = usable.length > 0 ? usable[usable.length - 1].detection.sharpness : null;
-
   return {
     candidates,
     confidence: assessConfidence({
       candidates,
       frameCount: usable.length,
       ocrAgrees,
-      sharpness,
+      // The detector's sharpness head is not used to grade the match: on the
+      // bundled model it spans only about 0.01-0.07, so the "blurry below 0.35"
+      // rule would downgrade every scan. It is used, on its own scale, to decide
+      // whether a card is present at all (see ScanPipeline.detect).
+      sharpness: null,
     }),
   };
 }

@@ -1,0 +1,27 @@
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'expo.modules.ocr'
+version = '0.1.0'
+
+// Local module: never published to Maven. Skips the plugin's publishing setup,
+// which otherwise looks for a 'release' SoftwareComponent that is not ready at
+// configuration time.
+expoModule {
+  canBePublished false
+}
+
+android {
+  namespace 'expo.modules.ocr'
+  defaultConfig {
+    minSdkVersion 24
+  }
+}
+
+dependencies {
+  // Google ML Kit text recognition, the bundled Latin model: it ships inside the
+  // app, so recognition works offline and needs no Google Play services download.
+  // Pinned so results cannot change under us.
+  implementation 'com.google.mlkit:text-recognition:16.0.1'
+}

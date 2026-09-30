@@ -193,6 +193,62 @@ export async function printingsForArt(artId: string): Promise<Printing[]> {
   return rows.map(toPrinting);
 }
 
+/**
+ * Resolve one row of the scan index to the printings a scan has to choose between.
+ *
+ * The index is keyed by printing id — the fingerprint job embeds one image per
+ * printing and writes that printing's id against the row — not by art id, which
+ * is what {@link printingsForArt} takes. Looking a row's id up as an art id finds
+ * nothing, which is how a good match used to come back as "no match". So find the
+ * printing the row belongs to, then every printing that shares its artwork, with
+ * the matched printing first. Null when the printing isn't in the local catalogue.
+ */
+export async function printingsForIndexRow(
+  rowId: string,
+): Promise<{ artId: string; printings: Printing[] } | null> {
+  const db = await openDatabase();
+  const match = await db.getFirstAsync<{ art_id: string }>(
+    'SELECT c.art_id AS art_id FROM printings p JOIN cards c ON c.id = p.card_id WHERE p.id = ?',
+    [rowId],
+  );
+  if (!match) return null;
+
+  const printings = await printingsForArt(match.art_id);
+  const matched = printings.findIndex((printing) => printing.id === rowId);
+  if (matched > 0) printings.unshift(...printings.splice(matched, 1));
+  return { artId: match.art_id, printings };
+}
+
+/**
+ * Every printing of a game that carries a given printed serial — "OP17-070" for
+ * One Piece. A serial pins the card down almost exactly, so this is a handful of
+ * rows: the original, reprints in other sets, foil and alternate-art versions.
+ */
+export async function printingsBySerial(gameId: GameId, serial: string): Promise<Printing[]> {
+  const db = await openDatabase();
+  const rows = await db.getAllAsync<PrintingRow>(
+    `${PRINTING_SELECT} WHERE p.game_id = ? AND p.number = ? ORDER BY s.release_date DESC, p.id ASC`,
+    [gameId, serial],
+  );
+  return rows.map(toPrinting);
+}
+
+/**
+ * Printings whose serial matches any of the given SQL LIKE patterns — the serial
+ * that was read and the ones a digit away from it (see nearSerialPatterns), so a
+ * misread digit can still be resolved by the rest of the evidence.
+ */
+export async function printingsMatchingSerials(gameId: GameId, patterns: string[]): Promise<Printing[]> {
+  if (patterns.length === 0) return [];
+  const db = await openDatabase();
+  const clauses = patterns.map(() => 'p.number LIKE ?').join(' OR ');
+  const rows = await db.getAllAsync<PrintingRow>(
+    `${PRINTING_SELECT} WHERE p.game_id = ? AND (${clauses}) ORDER BY s.release_date DESC, p.id ASC LIMIT 400`,
+    [gameId, ...patterns],
+  );
+  return rows.map(toPrinting);
+}
+
 export async function printingById(id: string): Promise<Printing | null> {
   const db = await openDatabase();
   const row = await db.getFirstAsync<PrintingRow>(`${PRINTING_SELECT} WHERE p.id = ?`, [id]);

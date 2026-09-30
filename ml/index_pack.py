@@ -85,7 +85,8 @@ def append_rows(pack: IndexPack, matrix: np.ndarray, ids: list[str]) -> IndexPac
     if pack.matrix.size == 0:
         return IndexPack(matrix=l2_normalise(np.asarray(matrix, dtype=np.float32)), ids=list(ids))
 
-    keep = [index for index, card_id in enumerate(pack.ids) if card_id not in set(ids)]
+    replaced = set(ids)
+    keep = [index for index, card_id in enumerate(pack.ids) if card_id not in replaced]
     kept_matrix = pack.matrix[keep] if keep else np.empty((0, pack.dim), dtype=np.float32)
     kept_ids = [pack.ids[index] for index in keep]
 

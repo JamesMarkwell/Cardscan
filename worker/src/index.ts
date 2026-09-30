@@ -119,7 +119,13 @@ app.get('/manifest.json', async (c) => {
   return c.json(manifest, 200, { 'Cache-Control': 'public, max-age=900' });
 });
 
-/** Packs and index files live in R2 and are immutable once published. */
+/**
+ * Packs and index files live in R2. Catalog and delta packs are immutable once
+ * published. Index packs are not: the fingerprint job adds rows to a version's
+ * pack in place as new cards are embedded, so caching one as immutable would pin
+ * a phone (or an edge cache) to an out-of-date index. They are revalidated
+ * instead; the app compares the ETag to know when to fetch again.
+ */
 app.get('/packs/*', async (c) => {
   const key = c.req.path.replace(/^\/packs\//, '');
   const object = await c.env.PACKS.get(key);
@@ -128,7 +134,8 @@ app.get('/packs/*', async (c) => {
   const headers = new Headers();
   object.writeHttpMetadata(headers);
   headers.set('etag', object.httpEtag);
-  headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+  const mutable = /\/index-[^/]*\.(bin|ids)$/.test(key);
+  headers.set('Cache-Control', mutable ? 'public, no-cache' : 'public, max-age=31536000, immutable');
   return new Response(object.body, { headers });
 });
 
@@ -168,19 +175,31 @@ app.get('/search', async (c) => {
   return c.json({ results: rows.results });
 });
 
-/** Printings still waiting for a fingerprint — polled by the GitHub Action. */
+/**
+ * Printings for the fingerprint job to embed. By default only those never
+ * fingerprinted. With `all=1`, every printing that has an image, paged with
+ * `offset` — the job uses that to compare against what the index pack actually
+ * holds, since "fingerprinted" only records that a printing was embedded once,
+ * not that its row is still in the pack.
+ */
 app.get('/admin/pending-fingerprints', async (c) => {
   if (!authorised(c.req.header('authorization'), c.env)) return c.text('Unauthorized', 401);
 
   const game = c.req.query('game');
+  const everything = c.req.query('all') === '1';
   const limit = Math.min(Number(c.req.query('limit') ?? 500), 2000);
+  const offset = everything ? Math.max(0, Number(c.req.query('offset') ?? 0) || 0) : 0;
+
   const rows = await c.env.DB.prepare(
     `SELECT id, game_id AS gameId, image_url AS imageUrl
      FROM printings
-     WHERE fingerprinted_at IS NULL AND image_url IS NOT NULL ${game ? 'AND game_id = ?' : ''}
-     LIMIT ?`,
+     WHERE image_url IS NOT NULL
+       ${everything ? '' : 'AND fingerprinted_at IS NULL'}
+       ${game ? 'AND game_id = ?' : ''}
+     ORDER BY id
+     LIMIT ? OFFSET ?`,
   )
-    .bind(...(game ? [game, limit] : [limit]))
+    .bind(...(game ? [game] : []), limit, offset)
     .all();
 
   return c.json({ printings: rows.results });

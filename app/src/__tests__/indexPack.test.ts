@@ -5,7 +5,15 @@
  */
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { float16ToFloat32, parseIndexPack } from '../data/indexPackFormat';
+import {
+  assertPackMatchesIds,
+  float16ToFloat32,
+  isIndexStale,
+  packRowCount,
+  parseIndexPack,
+  remoteIndexEtag,
+  withVersionParam,
+} from '../data/indexPackFormat';
 import { search } from '../scan/search';
 
 const FIXTURES = join(__dirname, 'fixtures');
@@ -75,5 +83,74 @@ describe('float16ToFloat32', () => {
     expect(float16ToFloat32(0x3c00)).toBe(1);
     expect(float16ToFloat32(0xbc00)).toBe(-1);
     expect(float16ToFloat32(0x3800)).toBeCloseTo(0.5, 6);
+  });
+});
+
+
+describe('keeping the phone\u2019s pack current', () => {
+  describe('isIndexStale', () => {
+    it('is stale when the server\u2019s copy has a different ETag', () => {
+      expect(isIndexStale('"aaa"', '"bbb"')).toBe(true);
+    });
+
+    it('is current when the ETags match', () => {
+      expect(isIndexStale('"aaa"', '"aaa"')).toBe(false);
+    });
+
+    it('is stale when no ETag was recorded — a pack from before they were kept is fetched once more', () => {
+      expect(isIndexStale(null, '"aaa"')).toBe(true);
+    });
+
+    it('keeps what it has when the server gives no answer', () => {
+      expect(isIndexStale('"aaa"', null)).toBe(false);
+      expect(isIndexStale(null, null)).toBe(false);
+    });
+  });
+
+  describe('remoteIndexEtag', () => {
+    it('asks with HEAD and returns the ETag', async () => {
+      const fetchFn = jest.fn().mockResolvedValue(new Response(null, { status: 200, headers: { etag: '"abc"' } }));
+      expect(await remoteIndexEtag('https://w/packs/games/onepiece/index-1.bin', fetchFn)).toBe('"abc"');
+      expect(fetchFn).toHaveBeenCalledWith('https://w/packs/games/onepiece/index-1.bin', { method: 'HEAD' });
+    });
+
+    it('returns null for an error response, or one with no ETag', async () => {
+      expect(await remoteIndexEtag('u', jest.fn().mockResolvedValue(new Response(null, { status: 404 })))).toBeNull();
+      expect(await remoteIndexEtag('u', jest.fn().mockResolvedValue(new Response(null, { status: 200 })))).toBeNull();
+    });
+  });
+
+  describe('withVersionParam', () => {
+    it('makes a changed pack a different URL', () => {
+      expect(withVersionParam('https://w/p.bin', '"abc"')).toBe('https://w/p.bin?e=%22abc%22');
+      expect(withVersionParam('https://w/p.bin?x=1', '"abc"')).toBe('https://w/p.bin?x=1&e=%22abc%22');
+    });
+
+    it('leaves the URL alone with no ETag', () => {
+      expect(withVersionParam('https://w/p.bin', null)).toBe('https://w/p.bin');
+    });
+  });
+
+  describe('assertPackMatchesIds', () => {
+    it('accepts a pack and the ids written with it', () => {
+      const { buffer, ids } = load('sample-f32');
+      expect(packRowCount(new Uint8Array(buffer))).toBe(ids.length);
+      expect(() => assertPackMatchesIds(new Uint8Array(buffer), ids.join('\n'))).not.toThrow();
+    });
+
+    it('ignores blank lines and a trailing newline', () => {
+      const { buffer, ids } = load('sample-f32');
+      expect(() => assertPackMatchesIds(new Uint8Array(buffer), `${ids.join('\n')}\n\n`)).not.toThrow();
+    });
+
+    it('rejects a pack whose ids belong to a different build', () => {
+      const { buffer, ids } = load('sample-f32');
+      expect(() => assertPackMatchesIds(new Uint8Array(buffer), ids.slice(1).join('\n'))).toThrow(/rows but/);
+    });
+
+    it('rejects something that is not a pack, or a truncated one', () => {
+      expect(() => assertPackMatchesIds(new Uint8Array(32), 'a')).toThrow(/Not a CardScan index pack/);
+      expect(() => assertPackMatchesIds(new Uint8Array(4), 'a')).toThrow(/truncated/);
+    });
   });
 });
