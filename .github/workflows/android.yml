@@ -144,4 +144,4 @@ jobs:
           name: cardscan-${{ inputs.variant || 'release' }}-apk
           path: app/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
