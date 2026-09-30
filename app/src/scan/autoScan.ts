@@ -20,8 +20,10 @@ export const THUMB_ROWS = 24;
 
 /** Mean brightness change (0-255) between samples below which the picture is "still". */
 export const STILL_DIFF = 4;
-/** Mean brightness change from the last scanned scene above which it counts as a new scene. */
-export const CHANGED_DIFF = 14;
+/** Structural change (overall brightness removed) from the last scanned scene above which it counts as a new scene. */
+export const CHANGED_DIFF = 10;
+/** Consecutive samples that must differ from the scanned scene before a new card counts. */
+export const AWAY_SAMPLES = 3;
 /** Consecutive still samples needed before a picture is taken (~0.6s at the sample rate). */
 export const STABLE_SAMPLES = 5;
 /** Minimum time between samples, so a fast camera costs no more than a slow one. */
@@ -34,6 +36,8 @@ export interface AutoScanState {
   ref: number[] | null;
   /** How many samples in a row have been still. */
   stable: number;
+  /** How many samples in a row have differed from the scanned scene. */
+  away: number;
   /** Whether a trigger is allowed: true until one fires, then only once the scene changes. */
   armed: boolean;
   /** When the last sample was taken (ms), or 0. */
@@ -42,7 +46,7 @@ export interface AutoScanState {
 
 export function createAutoScanState(): AutoScanState {
   'worklet';
-  return { prev: null, ref: null, stable: 0, armed: true, lastSampleAt: 0 };
+  return { prev: null, ref: null, stable: 0, away: 0, armed: true, lastSampleAt: 0 };
 }
 
 /** Whether enough time has passed to take another sample. */
@@ -98,7 +102,29 @@ export function meanAbsDiff(a: number[], b: number[]): number {
   return total / a.length;
 }
 
+/**
+ * How different two scenes look, ignoring overall brightness: each thumbnail has
+ * its own mean removed first, so exposure drifting or a hand's shadow does not read
+ * as a new card, while a different picture still does.
+ */
+export function sceneDistance(a: number[], b: number[]): number {
+  'worklet';
+  let meanA = 0;
+  let meanB = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    meanA += a[i];
+    meanB += b[i];
+  }
+  meanA /= a.length;
+  meanB /= b.length;
+  let total = 0;
+  for (let i = 0; i < a.length; i += 1) total += Math.abs(a[i] - meanA - (b[i] - meanB));
+  return total / a.length;
+}
+
 export interface AutoScanStep {
+  /** The thumbnail this step saw, so the caller can tell a repeat of a scanned scene. */
+  thumb: number[];
   /** True when a picture should be taken now. */
   trigger: boolean;
   /** Change from the previous sample (large before the first). */
@@ -119,14 +145,17 @@ export function stepAutoScan(state: AutoScanState, thumb: number[], now: number)
   state.prev = thumb;
   state.stable = still <= STILL_DIFF ? state.stable + 1 : 0;
 
-  const changed = state.ref ? meanAbsDiff(thumb, state.ref) : 1000;
-  if (!state.armed && changed >= CHANGED_DIFF) state.armed = true;
+  const changed = state.ref ? sceneDistance(thumb, state.ref) : 1000;
+  // A new card must stay different for a few samples: a passing hand is not one.
+  state.away = changed >= CHANGED_DIFF ? state.away + 1 : 0;
+  if (!state.armed && state.away >= AWAY_SAMPLES) state.armed = true;
 
   if (state.armed && state.stable >= STABLE_SAMPLES) {
     state.ref = thumb;
     state.armed = false;
     state.stable = 0;
-    return { trigger: true, still, changed };
+    state.away = 0;
+    return { trigger: true, still, changed, thumb };
   }
-  return { trigger: false, still, changed };
+  return { trigger: false, still, changed, thumb };
 }
