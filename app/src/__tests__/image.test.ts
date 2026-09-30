@@ -1,4 +1,4 @@
-import { cropNormalised, dewarp, laplacianVariance, rotate180, squashResize, toImageNetTensor, IMAGENET_MEAN, IMAGENET_STD, RgbaImage } from '../scan/image';
+import { cropNormalised, dewarp, laplacianVariance, rotate180, rotate90, squashResize, toImageNetTensor, IMAGENET_MEAN, IMAGENET_STD, RgbaImage } from '../scan/image';
 import { Point } from '../scan/geometry';
 
 function solid(width: number, height: number, rgb: [number, number, number]): RgbaImage {
@@ -114,5 +114,39 @@ describe('laplacianVariance', () => {
 
   it('returns zero for an image too small to have a neighbourhood', () => {
     expect(laplacianVariance(solid(2, 2, [1, 2, 3]))).toBe(0);
+  });
+});
+
+describe('rotate90', () => {
+  /** 3 wide x 2 tall, each pixel's red channel is a distinct id 0..5 (row-major). */
+  function labelled(): RgbaImage {
+    const data = new Uint8Array(3 * 2 * 4);
+    for (let i = 0; i < 6; i += 1) data.set([i, 0, 0, 255], i * 4);
+    return { data, width: 3, height: 2 };
+  }
+  const ids = (image: RgbaImage) => Array.from({ length: image.width * image.height }, (_, i) => image.data[i * 4]);
+
+  it('turns a 3x2 image clockwise into 2x3', () => {
+    // 0 1 2      3 0
+    // 3 4 5  ->  4 1
+    //            5 2
+    const rotated = rotate90(labelled(), true);
+    expect([rotated.width, rotated.height]).toEqual([2, 3]);
+    expect(ids(rotated)).toEqual([3, 0, 4, 1, 5, 2]);
+  });
+
+  it('turns it counter-clockwise the other way', () => {
+    // 0 1 2      2 5
+    // 3 4 5  ->  1 4
+    //            0 3
+    const rotated = rotate90(labelled(), false);
+    expect([rotated.width, rotated.height]).toEqual([2, 3]);
+    expect(ids(rotated)).toEqual([2, 5, 1, 4, 0, 3]);
+  });
+
+  it('undoes itself, and two quarter turns equal rotate180', () => {
+    const image = labelled();
+    expect(ids(rotate90(rotate90(image, true), false))).toEqual(ids(image));
+    expect(ids(rotate90(rotate90(image, true), true))).toEqual(ids(rotate180(image)));
   });
 });

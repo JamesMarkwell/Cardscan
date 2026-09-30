@@ -91,6 +91,31 @@ export function rotate180(image: RgbaImage): RgbaImage {
   return { data: out, width, height };
 }
 
+/**
+ * Rotate an RGBA image a quarter turn — clockwise by default. Used to try the
+ * orientations of a card crop the camera may have delivered sideways.
+ */
+export function rotate90(image: RgbaImage, clockwise = true): RgbaImage {
+  const { width, height, data } = image;
+  const out = new Uint8Array(width * height * 4);
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const src = (y * width + x) * 4;
+      // Clockwise: (x, y) -> (height - 1 - y, x); counter-clockwise: (y, width - 1 - x).
+      const dstX = clockwise ? height - 1 - y : y;
+      const dstY = clockwise ? x : width - 1 - x;
+      const dst = (dstY * height + dstX) * 4;
+      out[dst] = data[src];
+      out[dst + 1] = data[src + 1];
+      out[dst + 2] = data[src + 2];
+      out[dst + 3] = data[src + 3];
+    }
+  }
+
+  return { data: out, width: height, height: width };
+}
+
 /** Pack an RGBA square into NCHW float32 with ImageNet normalisation. */
 export function toImageNetTensor(image: RgbaImage, size: number, into?: Float32Array): Float32Array {
   const tensor = into ?? new Float32Array(3 * size * size);

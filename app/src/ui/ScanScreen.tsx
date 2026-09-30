@@ -252,15 +252,24 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
             // 'rgb' is 3 bytes/pixel, but some pipelines negotiate a 4-byte
             // layout; derive it from the row stride and copy into compact RGBA.
             const channels = Math.max(3, Math.round(bytesPerRow / width));
+            // The channel order is not always RGB: the camera often hands over
+            // BGRA ('rgb-bgra-8-bit'). Reading it as RGB swaps red and blue, and
+            // the embedder scores a red/blue-swapped card ~0.74 against ~0.91.
+            const isBgra = frame.pixelFormat === 'rgb-bgra-8-bit';
+            const redAt = isBgra ? 2 : 0;
+            const blueAt = isBgra ? 0 : 2;
+            runOnJS(crumb)(
+              `worklet: format=${frame.pixelFormat} orientation=${frame.orientation} mirrored=${frame.isMirrored} ${width}x${height} stride=${bytesPerRow} channels=${channels}`,
+            );
             out = new Uint8Array(width * height * 4);
             for (let y = 0; y < height; y += 1) {
               const row = y * bytesPerRow;
               for (let x = 0; x < width; x += 1) {
                 const s = row + x * channels;
                 const d = (y * width + x) * 4;
-                out[d] = src[s];
+                out[d] = src[s + redAt];
                 out[d + 1] = src[s + 1];
-                out[d + 2] = src[s + 2];
+                out[d + 2] = src[s + blueAt];
                 out[d + 3] = 255;
               }
             }

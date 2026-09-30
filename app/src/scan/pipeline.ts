@@ -13,6 +13,7 @@ import {
   dewarp,
   laplacianVariance,
   rotate180,
+  rotate90,
   squashResize,
   toImageNetTensor,
 } from './image';
@@ -53,10 +54,10 @@ const DEFAULTS: Required<ScanOptions> = {
 };
 
 // A confident upright cosine match. Above this we trust the upright reading and
-// skip the 180-degree retry — its embed re-runs toImageNetTensor (a ~600k-element
-// loop) and rotate180 (~800k) on the JS thread, doubling the per-frame cost the
-// index turns on. Only a weak upright match (an upside-down or not-yet-matched
-// card) is worth paying for the retry.
+// skip the other-orientation retries — each re-runs toImageNetTensor (a
+// ~600k-element loop) and a rotation on the JS thread. Only a weak upright match
+// (a sideways or upside-down card, or one that isn't indexed) is worth paying for
+// the retries.
 const ROTATION_RETRY_BELOW = 0.6;
 
 export interface FrameResult {
@@ -204,21 +205,30 @@ export class ScanPipeline {
     let candidates = this.index ? search(this.index, embedding, this.options.topK) : [];
     this.trace?.(`search: done top=${candidates[0]?.score?.toFixed(3) ?? 'none'}`);
 
-    // Milo is sensitive to upside-down cards, so try the 180-degree rotation and
-    // keep whichever direction matched more strongly. Both the second embed's
-    // tensor packing and rotate180 run on the JS thread, so doing this on every
-    // frame doubles the per-frame cost the moment an index is loaded — enough to
-    // starve touch handling (the tab bar and game chips stop responding). Only
-    // pay for it when the upright match is weak, which is the only case it can
-    // change the answer: a confident upright card keeps the single-embed cost.
+    // Milo is sensitive to orientation: measured against the same card, a 180°
+    // turn scores ~0.40 and a quarter turn ~0.57, versus ~0.91 upright. The camera
+    // can hand over a sideways or upside-down buffer, so when the upright reading
+    // is weak try the other three orientations and keep the strongest. Each embed
+    // packs a ~600k-element tensor on the JS thread, so a confident upright card
+    // skips this and keeps the single-embed cost.
     const bestUpright = candidates[0]?.score ?? -Infinity;
     if (this.options.tryRotated && this.index && bestUpright < ROTATION_RETRY_BELOW) {
-      const rotatedEmbedding = await this.embed(rotate180(crop));
-      const rotatedCandidates = search(this.index, rotatedEmbedding, this.options.topK);
-      const bestRotated = rotatedCandidates[0]?.score ?? -Infinity;
-      if (bestRotated > bestUpright) {
-        embedding = rotatedEmbedding;
-        candidates = rotatedCandidates;
+      let best = bestUpright;
+      const variants: Array<[string, () => RgbaImage]> = [
+        ['180', () => rotate180(crop)],
+        ['90cw', () => rotate90(crop, true)],
+        ['90ccw', () => rotate90(crop, false)],
+      ];
+      for (const [label, make] of variants) {
+        const rotatedEmbedding = await this.embed(make());
+        const rotatedCandidates = search(this.index, rotatedEmbedding, this.options.topK);
+        const score = rotatedCandidates[0]?.score ?? -Infinity;
+        this.trace?.(`embed: rotation ${label} top=${score.toFixed(3)} (upright ${bestUpright.toFixed(3)})`);
+        if (score > best) {
+          best = score;
+          embedding = rotatedEmbedding;
+          candidates = rotatedCandidates;
+        }
       }
     }
     timings.embedMs = Date.now() - embedStart;
