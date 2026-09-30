@@ -200,4 +200,125 @@ describe('manifest', () => {
     expect(body.printings).toHaveLength(4);
     expect(body.printings[0].imageUrl).toMatch(/^https:\/\//);
   });
+
+  describe('listing printings for the fingerprint job', () => {
+    async function list(query: string): Promise<Array<{ id: string }>> {
+      const response = await app.fetch(
+        new Request(`https://cardscan-worker.workers.dev/admin/pending-fingerprints?${query}`, {
+          headers: { authorization: 'Bearer correct-token' },
+        }),
+        env,
+      );
+      expect(response.status).toBe(200);
+      return ((await response.json()) as { printings: Array<{ id: string }> }).printings;
+    }
+
+    beforeEach(async () => {
+      stubFetch();
+      await runRefresh(env, ['onepiece']);
+      env.WORKER_ADMIN_TOKEN = 'correct-token';
+    });
+
+    it('hides printings already marked fingerprinted by default', async () => {
+      const everyone = await list('game=onepiece&all=1');
+      // Mark two as done, as the job's callback does.
+      await env.DB.prepare('UPDATE printings SET fingerprinted_at = ? WHERE id IN (?, ?)')
+        .bind('2026-09-25T00:00:00Z', everyone[0].id, everyone[1].id)
+        .run();
+
+      const pending = await list('game=onepiece');
+      expect(pending).toHaveLength(everyone.length - 2);
+      expect(pending.map((p) => p.id)).not.toContain(everyone[0].id);
+    });
+
+    it('with all=1 lists every printing with an image, fingerprinted or not', async () => {
+      const before = await list('game=onepiece&all=1');
+      await env.DB.prepare('UPDATE printings SET fingerprinted_at = ? WHERE id = ?')
+        .bind('2026-09-25T00:00:00Z', before[0].id)
+        .run();
+
+      const after = await list('game=onepiece&all=1');
+      expect(after.map((p) => p.id)).toEqual(before.map((p) => p.id));
+      expect(after).toHaveLength(4);
+    });
+
+    it('pages with offset in a stable order, without repeats or gaps', async () => {
+      const all = await list('game=onepiece&all=1&limit=2000');
+      const first = await list('game=onepiece&all=1&limit=3&offset=0');
+      const second = await list('game=onepiece&all=1&limit=3&offset=3');
+
+      expect(first).toHaveLength(3);
+      expect([...first, ...second].map((p) => p.id)).toEqual(all.map((p) => p.id));
+      expect(all.map((p) => p.id)).toEqual([...all.map((p) => p.id)].sort());
+    });
+
+    it('ignores offset unless asked for everything', async () => {
+      const pending = await list('game=onepiece');
+      const withOffset = await list('game=onepiece&offset=2');
+      expect(withOffset).toHaveLength(pending.length);
+    });
+  });
+});
+
+describe('pack caching', () => {
+  let db: LocalD1;
+  let packs: LocalR2;
+  let env: Env;
+
+  beforeEach(() => {
+    db = new LocalD1();
+    db.applyMigration(MIGRATION);
+    packs = new LocalR2();
+    env = {
+      DB: db as unknown as D1Database,
+      PACKS: packs as unknown as R2Bucket,
+      USER_AGENT: 'CardScan-test/0.1',
+      SOURCE_MIN_INTERVAL_MS: '0',
+      PUBLIC_BASE_URL: '',
+    };
+  });
+
+  async function get(key: string): Promise<Response> {
+    return app.fetch(new Request(`https://cardscan-worker.workers.dev/packs/${key}`), env);
+  }
+
+  it('serves an index pack revalidated, because the job rewrites it in place', async () => {
+    await env.PACKS.put('games/onepiece/index-20260930.bin', new Uint8Array([1, 2, 3]));
+    await env.PACKS.put('games/onepiece/index-20260930.ids', 'a\nb');
+
+    for (const key of ['games/onepiece/index-20260930.bin', 'games/onepiece/index-20260930.ids']) {
+      const response = await get(key);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('public, no-cache');
+      expect(response.headers.get('etag')).toBeTruthy();
+    }
+  });
+
+  it('answers HEAD with an ETag that changes when the pack is rewritten', async () => {
+    const key = 'games/onepiece/index-20260930.bin';
+    const head = () =>
+      app.fetch(new Request(`https://cardscan-worker.workers.dev/packs/${key}`, { method: 'HEAD' }), env);
+
+    await env.PACKS.put(key, new Uint8Array([1, 2, 3]));
+    const first = await head();
+    expect(first.status).toBe(200);
+    const firstTag = first.headers.get('etag');
+    expect(firstTag).toBeTruthy();
+
+    // The job grows the pack in place: same URL, new content.
+    await env.PACKS.put(key, new Uint8Array([1, 2, 3, 4, 5, 6]));
+    const second = await head();
+    expect(second.headers.get('etag')).toBeTruthy();
+    expect(second.headers.get('etag')).not.toBe(firstTag);
+  });
+
+  it('still serves catalog and delta packs as immutable', async () => {
+    await env.PACKS.put('games/onepiece/catalog-20260930.json', '{}');
+    await env.PACKS.put('games/onepiece/delta-20260929-20260930.json', '{}');
+
+    for (const key of ['games/onepiece/catalog-20260930.json', 'games/onepiece/delta-20260929-20260930.json']) {
+      const response = await get(key);
+      expect(response.headers.get('cache-control')).toContain('immutable');
+    }
+  });
 });

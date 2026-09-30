@@ -8,7 +8,7 @@
  */
 import * as SQLite from 'expo-sqlite';
 import { openDatabase } from './db';
-import { indexPackExists, saveIndexPack } from './indexPack';
+import { indexPackNeedsDownload, saveIndexPack } from './indexPack';
 import { GameId } from './types';
 
 export interface GameManifest {
@@ -245,10 +245,11 @@ async function runSyncGame(
   // by the fingerprint job after and separately from the catalog, so a version
   // that synced before its index existed — or before the manifest advertised one
   // — still needs it, even when the catalog itself is already up to date. Only
-  // download when it's advertised and not already here; a missing or failed
-  // index must never fail an otherwise-good catalog sync.
+  // download when it's advertised and missing or changed on the server (the
+  // fingerprint job grows a version's pack in place); a missing or failed index
+  // must never fail an otherwise-good catalog sync.
   let indexFetched = false;
-  if (game.indexUrl && game.indexIdsUrl && !indexPackExists(game.game, game.version)) {
+  if (game.indexUrl && game.indexIdsUrl && (await indexPackNeedsDownload(game.game, game.version, game.indexUrl))) {
     onProgress?.({ stage: 'index', game: game.game, ratio: 0 });
     try {
       await saveIndexPack(game.game, game.version, game.indexUrl, game.indexIdsUrl);
