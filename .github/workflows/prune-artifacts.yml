@@ -1,0 +1,73 @@
+name: prune-artifacts
+
+# Deletes build artifacts older than three days so Actions storage does not
+# fill up. The free plan allows 500 MB across every private repository on the
+# account, so one repository's leftovers starve all the others.
+#
+# `retention-days` only applies to artifacts uploaded after it is set and never
+# goes below one day; this deletes by age regardless.
+#
+# Runs daily, after any other workflow here finishes (which is when new
+# artifacts appear), and on demand.
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_run:
+    workflows: ['Android', 'CI', 'Deploy worker', 'Fingerprint new cards']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        description: 'Delete artifacts older than this many days'
+        required: false
+        default: '3'
+      dry_run:
+        description: 'List what would be deleted without deleting it'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  actions: write
+
+concurrency:
+  group: prune-artifacts
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          MAX_AGE_DAYS: ${{ inputs.max_age_days || '3' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        with:
+          script: |
+            const maxAge = Number(process.env.MAX_AGE_DAYS || 3);
+            const dryRun = process.env.DRY_RUN === 'true';
+            const cutoff = Date.now() - maxAge * 86400000;
+            const mb = (b) => (b / 1048576).toFixed(1);
+
+            const all = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 },
+            );
+            const live = all.filter((a) => !a.expired);
+            const doomed = live.filter(
+              (a) => new Date(a.created_at).getTime() < cutoff);
+
+            core.info(`${live.length} live artifacts, ${doomed.length} older than ${maxAge} days`);
+
+            let freed = 0;
+            for (const a of doomed) {
+              core.info(`${dryRun ? 'would delete' : 'deleting'}  ${a.name}  ${mb(a.size_in_bytes)} MB`);
+              if (!dryRun) {
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner, repo: context.repo.repo, artifact_id: a.id,
+                });
+              }
+              freed += a.size_in_bytes;
+            }
+            core.info(`${dryRun ? 'Would free' : 'Freed'} ${mb(freed)} MB`);
