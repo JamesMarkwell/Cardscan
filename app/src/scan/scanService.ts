@@ -118,12 +118,17 @@ export class ScanService {
     onStage?: (stage: string) => void,
   ): Promise<{ result: ScanResult | null; status: string }> {
     onStage?.('Detecting card…');
+    // Let the status paint before the synchronous resize and tensor packing at
+    // the start of detection hold the JS thread — otherwise the screen keeps
+    // showing the previous step for the whole of it.
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
     const processed = await this.pipeline.processFrame(frame);
     if (processed.rejected) {
       return { result: null, status: processed.rejected };
     }
 
     onStage?.('Matching…');
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
     this.reset();
     this.frames.push(processed);
     const result = await this.finish(null);

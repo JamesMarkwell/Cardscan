@@ -24,6 +24,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-nati
 import { Camera, useCameraDevice, useCameraPermission, useFrameOutput, usePreviewOutput } from 'react-native-vision-camera';
 import { runOnJS } from 'react-native-worklets';
 import { GAMES, GameId } from '../data/types';
+import { crumb, readCrumbs } from '../debug/breadcrumbs';
 import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
@@ -75,6 +76,9 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   // worklet to the camera thread whenever it changes — so there is no shared
   // cross-thread flag to get wrong.
   const [grabbing, setGrabbing] = useState(false);
+  // Tap the status bar to show the step log (survives a crash — see breadcrumbs).
+  const [showLog, setShowLog] = useState(false);
+  const [logLines, setLogLines] = useState<string[]>([]);
 
   const mounted = useRef(true);
   // True from the moment Scan is tapped until we've consumed one frame. Guards
@@ -93,6 +97,25 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   useEffect(() => {
     if (!hasPermission) void requestPermission();
   }, [hasPermission, requestPermission]);
+
+  // Point the pipeline's step logging at the crash-surviving log.
+  useEffect(() => {
+    service.pipeline.trace = crumb;
+    return () => {
+      service.pipeline.trace = undefined;
+    };
+  }, [service]);
+
+  // Confirms the render that installs (or removes) the grab worklet committed.
+  useEffect(() => {
+    crumb(`render: grabbing=${grabbing}`);
+  }, [grabbing]);
+
+  const toggleLog = () => {
+    const next = !showLog;
+    setShowLog(next);
+    if (next) void readCrumbs(16).then((lines) => mounted.current && setLogLines(lines));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -129,6 +152,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
         clearTimeout(watchdog.current);
         watchdog.current = null;
       }
+      crumb(`js: frame received ${width}x${height}, ${data.length} bytes`);
       setStatus(`Got frame ${width}×${height}…`);
       const frame: RgbaImage = { data, width, height };
       void service
@@ -136,6 +160,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
           if (mounted.current) setStatus(stage);
         })
         .then(({ result, status: next }) => {
+          crumb(`js: scan finished status=${next} printing=${result?.printing?.id ?? 'none'}`);
           if (!mounted.current) return;
           if (result && result.printing) {
             void Haptics.notificationAsync(
@@ -152,6 +177,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
           }
         })
         .catch((error: Error) => {
+          crumb(`js: scan error ${error.message}`);
           if (mounted.current) setStatus(`Scan error: ${error.message}`);
         })
         .finally(() => {
@@ -164,6 +190,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   // The grab worklet threw. Surface the reason on screen and reset the shutter,
   // so a failure in the camera thread is visible rather than a silent stall.
   const onGrabError = useCallback((message: string) => {
+    crumb(`js: grab error ${message}`);
     if (!awaitingCapture.current || !mounted.current) return;
     awaitingCapture.current = false;
     setGrabbing(false);
@@ -191,6 +218,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
           let width = 0;
           let height = 0;
           let failure: string | null = null;
+          runOnJS(crumb)('worklet: grab start');
           try {
             const plane = frame.getPlanes()[0];
             if (plane == null) throw new Error('frame has no pixel plane');
@@ -220,6 +248,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
           if (failure != null || out == null) {
             runOnJS(onGrabError)(failure ?? 'no pixels');
           } else {
+            runOnJS(crumb)('worklet: copied, handing to JS');
             runOnJS(onCapturedFrame)(out, width, height);
           }
         }
@@ -232,6 +261,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   // The manual shutter: install the grab worklet so the next frame is captured.
   const requestScan = () => {
     if (!ready || awaitingCapture.current) return;
+    crumb('tap: scan requested');
     awaitingCapture.current = true;
     setScanning(true);
     setStatus('Capturing…');
@@ -239,6 +269,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     // never be left spinning with nothing scheduled to reset it.
     watchdog.current = setTimeout(() => {
       if (!awaitingCapture.current) return;
+      crumb('watchdog: no frame in 6s');
       awaitingCapture.current = false;
       setGrabbing(false);
       if (mounted.current) {
@@ -297,7 +328,20 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       </View>
 
       <View style={styles.controls}>
-        <View style={styles.statusBar}>
+        {showLog ? (
+          <View style={styles.logBox}>
+            {logLines.length === 0 ? (
+              <Text style={styles.logText}>No log yet.</Text>
+            ) : (
+              logLines.map((line, index) => (
+                <Text key={`${index}-${line}`} style={styles.logText}>
+                  {line}
+                </Text>
+              ))
+            )}
+          </View>
+        ) : null}
+        <Pressable style={styles.statusBar} onPress={toggleLog}>
           {!modelsReady ? <ActivityIndicator color={theme.accent} /> : null}
           <Text style={styles.statusText}>{status}</Text>
           {syncing ? (
@@ -305,7 +349,8 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
           ) : !indexReady ? (
             <Text style={styles.warning}>No card index yet — it downloads on first sync.</Text>
           ) : null}
-        </View>
+          <Text style={styles.logHint}>{showLog ? 'tap to hide log' : 'tap for log'}</Text>
+        </Pressable>
 
         <Pressable
           accessibilityRole="button"
@@ -394,6 +439,15 @@ const styles = StyleSheet.create({
   },
   statusText: { color: theme.text, fontSize: 15, textAlign: 'center' },
   warning: { color: theme.check, fontSize: 12, textAlign: 'center' },
+  logHint: { color: theme.textMuted, fontSize: 10, textAlign: 'center' },
+  logBox: {
+    alignSelf: 'stretch',
+    gap: 1,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    borderRadius: theme.radius,
+    padding: theme.spacing(1),
+  },
+  logText: { color: '#9fe870', fontSize: 10, fontFamily: 'monospace' },
   shutter: {
     minWidth: 200,
     alignItems: 'center',

@@ -71,6 +71,10 @@ export class ScanPipeline {
   private detectorTensor = new Float32Array(3 * DETECTOR_SIZE * DETECTOR_SIZE);
   private embedderTensor = new Float32Array(3 * EMBEDDER_SIZE * EMBEDDER_SIZE);
 
+  /** Optional step logger. The app points this at its crash-surviving log so the
+   * last step reached is known if a scan takes the app down. */
+  trace: ((message: string) => void) | undefined;
+
   constructor(options: ScanOptions = {}) {
     this.options = { ...DEFAULTS, ...options };
   }
@@ -105,13 +109,17 @@ export class ScanPipeline {
 
     // The detector was trained on squashed (aspect-ignoring) input, so its
     // normalised outputs map straight back onto the original frame.
+    this.trace?.(`detect: squash ${frame.width}x${frame.height} -> ${DETECTOR_SIZE}`);
     const squashed = squashResize(frame, DETECTOR_SIZE);
+    this.trace?.('detect: tensor');
     toImageNetTensor(squashed, DETECTOR_SIZE, this.detectorTensor);
 
     const inputName = this.detector.inputNames[0];
+    this.trace?.('detect: model run');
     const outputs = await this.detector.run({
       [inputName]: new Tensor('float32', this.detectorTensor, [1, 3, DETECTOR_SIZE, DETECTOR_SIZE]),
     });
+    this.trace?.('detect: model done');
 
     const names = this.detector.outputNames;
     const cornersRaw = Array.from(outputs[names[0]].data as Float32Array).slice(0, 8);
@@ -155,6 +163,7 @@ export class ScanPipeline {
 
     const detection = await this.detect(frame);
     timings.detectMs = Date.now() - started;
+    this.trace?.(`detect: done ${timings.detectMs}ms conf=${detection.confidence.toFixed(2)} present=${detection.cardPresent}`);
 
     const reject = (reason: string): FrameResult => ({
       detection,
@@ -170,12 +179,17 @@ export class ScanPipeline {
     if (quadCoverage(detection.corners) < this.options.minQuadArea) return reject('too-small');
 
     const dewarpStart = Date.now();
+    this.trace?.('dewarp: start');
     const crop = dewarp(frame, detection.corners, EMBEDDER_SIZE);
     timings.dewarpMs = Date.now() - dewarpStart;
+    this.trace?.(`dewarp: done ${timings.dewarpMs}ms`);
 
     const embedStart = Date.now();
+    this.trace?.('embed: start');
     let embedding = await this.embed(crop);
+    this.trace?.(`embed: done ${Date.now() - embedStart}ms, index=${this.index ? 'yes' : 'NO'}`);
     let candidates = this.index ? search(this.index, embedding, this.options.topK) : [];
+    this.trace?.(`search: done top=${candidates[0]?.score?.toFixed(3) ?? 'none'}`);
 
     // Milo is sensitive to upside-down cards, so try the 180-degree rotation and
     // keep whichever direction matched more strongly. Both the second embed's
