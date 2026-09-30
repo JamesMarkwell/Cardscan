@@ -3,7 +3,7 @@
  * matters here is the SQL they issue and the merge rule when an edit would make
  * two rows identical.
  */
-import { closeDatabase, openDatabase, removeFromCollection, searchPrintings, updateCollectionEntry } from '../data/db';
+import { closeDatabase, openDatabase, removeFromCollection, removeManyFromCollection, searchPrintings, updateCollectionEntry } from '../data/db';
 
 const db = {
   execAsync: jest.fn().mockResolvedValue(undefined),
@@ -77,6 +77,26 @@ it('removeFromCollection deletes just that row', async () => {
   await removeFromCollection(4);
   const call = db.runAsync.mock.calls.find(([sql]) => String(sql).startsWith('DELETE FROM collection'));
   expect(call?.[1]).toEqual([4]);
+});
+
+describe('removeManyFromCollection', () => {
+  it('deletes every given row in one statement', async () => {
+    await removeManyFromCollection([3, 5, 8]);
+    const call = db.runAsync.mock.calls.find(([sql]) => String(sql).includes('DELETE FROM collection WHERE id IN'));
+    expect(String(call?.[0])).toContain('IN (?,?,?)');
+    expect(call?.[1]).toEqual([3, 5, 8]);
+  });
+
+  it('batches a very large selection', async () => {
+    await removeManyFromCollection(Array.from({ length: 1200 }, (_, i) => i + 1));
+    const deletes = db.runAsync.mock.calls.filter(([sql]) => String(sql).includes('DELETE FROM collection WHERE id IN'));
+    expect(deletes.map(([, args]) => args.length)).toEqual([500, 500, 200]);
+  });
+
+  it('does nothing for an empty selection', async () => {
+    await removeManyFromCollection([]);
+    expect(db.runAsync).not.toHaveBeenCalled();
+  });
 });
 
 describe('searchPrintings', () => {

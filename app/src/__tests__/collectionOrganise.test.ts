@@ -4,6 +4,7 @@ import {
   formatMoney,
   gamesPresent,
   rowValue,
+  sortLabel,
   sortRows,
   summarise,
 } from '../collection/organise';
@@ -83,9 +84,17 @@ describe('sortRows', () => {
     expect(names(sortRows(collection(), 'name'))).toEqual(['Charizard', 'Monkey D. Luffy', 'Mystery', 'Pikachu']);
   });
 
-  it('value is highest first with unpriced cards last', () => {
-    // Charizard 200, Pikachu 10 (5 x 2), Luffy 12 (3 x 4)
-    expect(names(sortRows(collection(), 'value'))).toEqual(['Charizard', 'Monkey D. Luffy', 'Pikachu', 'Mystery']);
+  it('name Z–A reverses the alphabet', () => {
+    expect(names(sortRows(collection(), 'nameDesc'))).toEqual(['Pikachu', 'Mystery', 'Monkey D. Luffy', 'Charizard']);
+  });
+
+  it('price high to low goes by one card, not the stack, with unpriced last', () => {
+    // Charizard 200, Pikachu 5 (x2), Luffy 3 (x4 = 12 in total, still cheaper each)
+    expect(names(sortRows(collection(), 'price'))).toEqual(['Charizard', 'Pikachu', 'Monkey D. Luffy', 'Mystery']);
+  });
+
+  it('price low to high keeps unpriced cards last too', () => {
+    expect(names(sortRows(collection(), 'priceAsc'))).toEqual(['Monkey D. Luffy', 'Pikachu', 'Charizard', 'Mystery']);
   });
 
   it('quantity is most copies first', () => {
@@ -137,4 +146,9 @@ it('formatMoney shows the currency symbol, or a dash with no price', () => {
   expect(formatMoney(12.5, 'GBP')).toBe('£12.50');
   expect(formatMoney(3, 'USD')).toBe('$3.00');
   expect(formatMoney(null, 'GBP')).toBe('—');
+});
+
+it('sortLabel names the sort', () => {
+  expect(sortLabel('name')).toBe('Name A–Z');
+  expect(sortLabel('price')).toBe('Price high to low');
 });

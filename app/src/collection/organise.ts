@@ -5,12 +5,14 @@
 import type { CollectionRow } from '../data/db';
 import type { Condition, GameId } from '../data/types';
 
-export type SortKey = 'recent' | 'name' | 'value' | 'quantity' | 'set';
+export type SortKey = 'recent' | 'name' | 'nameDesc' | 'price' | 'priceAsc' | 'quantity' | 'set';
 
 export const SORTS: Array<{ key: SortKey; label: string }> = [
-  { key: 'recent', label: 'Recently added' },
-  { key: 'value', label: 'Highest value' },
   { key: 'name', label: 'Name A–Z' },
+  { key: 'nameDesc', label: 'Name Z–A' },
+  { key: 'price', label: 'Price high to low' },
+  { key: 'priceAsc', label: 'Price low to high' },
+  { key: 'recent', label: 'Recently added' },
   { key: 'quantity', label: 'Quantity' },
   { key: 'set', label: 'Set' },
 ];
@@ -54,12 +56,17 @@ export function sortRows(rows: CollectionRow[], key: SortKey): CollectionRow[] {
   switch (key) {
     case 'name':
       return sorted.sort(byName);
-    case 'value':
-      // Priced cards by value, unpriced ones last.
+    case 'nameDesc':
+      return sorted.sort((a, b) => byName(b, a));
+    case 'price':
+    case 'priceAsc': {
+      // By what one card costs, not the stack; unpriced cards last either way.
+      const direction = key === 'price' ? -1 : 1;
       return sorted.sort((a, b) => {
         if ((a.market === null) !== (b.market === null)) return a.market === null ? 1 : -1;
-        return rowValue(b) - rowValue(a) || byName(a, b);
+        return direction * ((a.market ?? 0) - (b.market ?? 0)) || byName(a, b);
       });
+    }
     case 'quantity':
       return sorted.sort((a, b) => b.quantity - a.quantity || byName(a, b));
     case 'set':
@@ -110,4 +117,9 @@ export function currencySymbol(currency: string | null): string {
 
 export function formatMoney(amount: number | null, currency: string | null): string {
   return amount === null ? '—' : `${currencySymbol(currency)}${amount.toFixed(2)}`;
+}
+
+/** The label for a sort key, for showing the current choice. */
+export function sortLabel(key: SortKey): string {
+  return SORTS.find((sort) => sort.key === key)?.label ?? '';
 }

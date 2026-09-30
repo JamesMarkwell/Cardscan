@@ -452,6 +452,19 @@ export async function removeFromCollection(id: number): Promise<void> {
   await db.runAsync('DELETE FROM collection WHERE id = ?', [id]);
 }
 
+/** Remove several collection rows at once. */
+export async function removeManyFromCollection(ids: number[]): Promise<void> {
+  if (ids.length === 0) return;
+  const db = await openDatabase();
+  await db.withTransactionAsync(async () => {
+    // SQLite caps the number of bound variables, so go in modest batches.
+    for (let start = 0; start < ids.length; start += 500) {
+      const batch = ids.slice(start, start + 500);
+      await db.runAsync(`DELETE FROM collection WHERE id IN (${batch.map(() => '?').join(',')})`, batch);
+    }
+  });
+}
+
 export interface PrintingResult extends Printing {
   market: number | null;
   currency: string | null;
