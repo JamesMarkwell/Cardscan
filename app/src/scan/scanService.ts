@@ -4,10 +4,10 @@
  * Kept free of React so it can be driven by the accuracy harness in /testset as
  * well as by the camera screen.
  */
-import { printingsForArt } from '../data/db';
+import { printingsForIndexRow } from '../data/db';
 import { GameId, Printing } from '../data/types';
 import { loadFrame } from './capture';
-import { ConfidenceResult } from './confidence';
+import { ConfidenceResult, assessConfidence } from './confidence';
 import { OCR_REGIONS, OcrProvider, ParsedCorner, PrintingScore, ocrAgreement, parseCornerText, rankPrintings } from './ocr';
 import { CaptureGate, FrameResult, ScanPipeline, combineFrames } from './pipeline';
 import { Candidate } from './search';
@@ -168,7 +168,16 @@ export class ScanService {
       }
     }
 
-    const confidence = combineFrames(this.frames, ocrAgreement(printingScores, chosen)).confidence;
+    // Grade the match on distinct artworks. The raw index rows include one per
+    // printing, so a card's runner-up is often just another printing of the same
+    // art at nearly the same score, which would read as an ambiguous match.
+    const confidence = assessConfidence({
+      candidates: candidates.map((candidate, row) => ({ artId: candidate.artId, score: candidate.score, row })),
+      frameCount: this.frames.filter((frame) => frame.candidates.length > 0).length,
+      ocrAgrees: ocrAgreement(printingScores, chosen),
+      // Not graded on the detector's sharpness head; see combineFrames.
+      sharpness: null,
+    });
     const embedding = this.frames[this.frames.length - 1]?.embedding ?? null;
 
     return {
@@ -184,10 +193,23 @@ export class ScanService {
   }
 
   private async expandCandidates(candidates: Candidate[]): Promise<ScanCandidate[]> {
+    // Each candidate's `artId` is really the index row's id, which is a printing
+    // id (see printingsForIndexRow). Several rows can share one artwork, so keep
+    // the best row per artwork, and skip rows whose printing isn't in the local
+    // catalogue (the index can be newer or older than the synced catalogue).
     const expanded: ScanCandidate[] = [];
-    for (const candidate of candidates.slice(0, 5)) {
-      const printings = await printingsForArt(candidate.artId);
-      expanded.push({ artId: candidate.artId, score: candidate.score, printings });
+    const seenArt = new Set<string>();
+    for (const candidate of candidates) {
+      if (expanded.length >= 5) break;
+      const resolved = await printingsForIndexRow(candidate.artId);
+      this.pipeline.trace?.(
+        `match: ${candidate.artId} score=${candidate.score.toFixed(3)} -> ${
+          resolved ? `${resolved.printings.length} printing(s)` : 'not in local catalogue'
+        }`,
+      );
+      if (!resolved || seenArt.has(resolved.artId)) continue;
+      seenArt.add(resolved.artId);
+      expanded.push({ artId: resolved.artId, score: candidate.score, printings: resolved.printings });
     }
     return expanded;
   }

@@ -193,6 +193,32 @@ export async function printingsForArt(artId: string): Promise<Printing[]> {
   return rows.map(toPrinting);
 }
 
+/**
+ * Resolve one row of the scan index to the printings a scan has to choose between.
+ *
+ * The index is keyed by printing id — the fingerprint job embeds one image per
+ * printing and writes that printing's id against the row — not by art id, which
+ * is what {@link printingsForArt} takes. Looking a row's id up as an art id finds
+ * nothing, which is how a good match used to come back as "no match". So find the
+ * printing the row belongs to, then every printing that shares its artwork, with
+ * the matched printing first. Null when the printing isn't in the local catalogue.
+ */
+export async function printingsForIndexRow(
+  rowId: string,
+): Promise<{ artId: string; printings: Printing[] } | null> {
+  const db = await openDatabase();
+  const match = await db.getFirstAsync<{ art_id: string }>(
+    'SELECT c.art_id AS art_id FROM printings p JOIN cards c ON c.id = p.card_id WHERE p.id = ?',
+    [rowId],
+  );
+  if (!match) return null;
+
+  const printings = await printingsForArt(match.art_id);
+  const matched = printings.findIndex((printing) => printing.id === rowId);
+  if (matched > 0) printings.unshift(...printings.splice(matched, 1));
+  return { artId: match.art_id, printings };
+}
+
 export async function printingById(id: string): Promise<Printing | null> {
   const db = await openDatabase();
   const row = await db.getFirstAsync<PrintingRow>(`${PRINTING_SELECT} WHERE p.id = ?`, [id]);
