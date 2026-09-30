@@ -6,6 +6,7 @@ import { CollectionRow } from '../data/db';
 import { Condition, Variant } from '../data/types';
 import { CardImage } from './CardImage';
 import { Chips } from './Chips';
+import { topInset } from './layout';
 import { theme } from './theme';
 
 const CONDITIONS: Condition[] = ['NM', 'LP', 'MP', 'HP', 'DMG'];
@@ -112,7 +113,7 @@ export function CardDetailModal({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.background },
-  content: { padding: theme.spacing(2.5), paddingTop: theme.spacing(6), gap: theme.spacing(1) },
+  content: { padding: theme.spacing(2.5), paddingTop: topInset + theme.spacing(1), gap: theme.spacing(1) },
   close: { alignSelf: 'flex-start', paddingVertical: theme.spacing(1) },
   closeText: { color: theme.accent, fontSize: 16, fontWeight: '600' },
   hero: { alignItems: 'center', marginVertical: theme.spacing(1.5) },

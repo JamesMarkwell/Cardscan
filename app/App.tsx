@@ -1,10 +1,11 @@
 /** App shell: three tabs, one shared scan service. */
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { StoredRates, fetchRates, loadRates, ratesAreStale } from './src/data/currency';
 import { openDatabase } from './src/data/db';
 import { crumb } from './src/debug/breadcrumbs';
+import { warmUpKerching } from './src/feedback/kerching';
 import { ErrorBoundary } from './src/ui/ErrorBoundary';
 import { loadIndexPack } from './src/data/indexPack';
 import { Settings, loadSettings, saveSettings } from './src/data/settings';
@@ -20,10 +21,10 @@ import { theme } from './src/ui/theme';
 
 type Tab = 'scan' | 'collection' | 'settings';
 
-const TABS: Array<{ id: Tab; label: string }> = [
-  { id: 'scan', label: 'Scan' },
-  { id: 'collection', label: 'Collection' },
-  { id: 'settings', label: 'Settings' },
+const TABS: Array<{ id: Tab; label: string; icon: number }> = [
+  { id: 'scan', label: 'Scan', icon: require('./assets/tabs/scan.png') },
+  { id: 'collection', label: 'Collection', icon: require('./assets/tabs/collection.png') },
+  { id: 'settings', label: 'Settings', icon: require('./assets/tabs/settings.png') },
 ];
 
 export default function App() {
@@ -51,6 +52,7 @@ export default function App() {
 
   useEffect(() => {
     void openDatabase();
+    warmUpKerching();
   }, []);
 
   useEffect(() => {
@@ -154,11 +156,23 @@ export default function App() {
         </View>
 
         <View style={styles.tabBar}>
-          {TABS.map((entry) => (
-            <Pressable key={entry.id} style={styles.tab} onPress={() => setTab(entry.id)}>
-              <Text style={[styles.tabText, tab === entry.id && styles.tabTextActive]}>{entry.label}</Text>
-            </Pressable>
-          ))}
+          {TABS.map((entry) => {
+            const active = tab === entry.id;
+            return (
+              <Pressable
+                key={entry.id}
+                style={styles.tab}
+                onPress={() => setTab(entry.id)}
+                accessibilityRole="tab"
+                accessibilityState={{ selected: active }}
+              >
+                <Image source={entry.icon} style={[styles.tabIcon, { tintColor: active ? theme.accent : theme.textMuted }]} />
+                <Text style={[styles.tabText, active && styles.tabTextActive]} numberOfLines={1}>
+                  {entry.label}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
 
         <ResultSheet
@@ -181,9 +195,10 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: theme.border,
     paddingBottom: theme.spacing(3),
-    paddingTop: theme.spacing(1.5),
+    paddingTop: theme.spacing(1),
   },
-  tab: { flex: 1, alignItems: 'center' },
-  tabText: { color: theme.textMuted, fontSize: 13, fontWeight: '600' },
+  tab: { flex: 1, alignItems: 'center', gap: 3 },
+  tabIcon: { width: 24, height: 24 },
+  tabText: { color: theme.textMuted, fontSize: 11, fontWeight: '700' },
   tabTextActive: { color: theme.accent },
 });

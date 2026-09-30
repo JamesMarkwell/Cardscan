@@ -42,6 +42,7 @@ import {
 import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { AddedCard, AddedToast } from './AddedToast';
+import { topInset } from './layout';
 import { theme } from './theme';
 
 // Frame size. Detection (384px) and the picture match (448px) would be fine on
@@ -56,6 +57,8 @@ const CAPTURE_FPS = 10;
 // If the camera hasn't delivered a frame this long after a tap, give up rather
 // than spin forever (e.g. the stream stalled).
 const CAPTURE_TIMEOUT_MS = 6000;
+// Height of the solid control panel at the bottom; the camera view above it is what the card is framed in.
+const PANEL_HEIGHT = 244;
 // An auto frame of the same scene as the last auto scan, this soon after it, is a repeat.
 const REPEAT_WINDOW_MS = 30_000;
 
@@ -552,23 +555,29 @@ export function ScanScreen({
         constraints={[{ fps: CAPTURE_FPS }]}
       />
 
-      <View pointerEvents="none" style={styles.frameGuide} />
+      {/* The camera view above the control panel: the card goes in the frame, and nothing overlaps it. */}
+      <View style={styles.viewfinder} pointerEvents="box-none">
+        <View style={styles.gameRow}>
+          {GAMES.map((game) => (
+            <Pressable
+              key={game.id}
+              onPress={() => onGameChange(game.id)}
+              style={[styles.gameChip, game.id === gameId && styles.gameChipActive]}
+            >
+              <Text style={[styles.gameChipText, game.id === gameId && styles.gameChipTextActive]} numberOfLines={1}>
+                {game.name}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
 
-      <View style={styles.gameRow}>
-        {GAMES.map((game) => (
-          <Pressable
-            key={game.id}
-            onPress={() => onGameChange(game.id)}
-            style={[styles.gameChip, game.id === gameId && styles.gameChipActive]}
-          >
-            <Text style={[styles.gameChipText, game.id === gameId && styles.gameChipTextActive]}>
-              {game.name}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
+        <View pointerEvents="none" style={styles.frameGuide}>
+          <View style={[styles.corner, styles.cornerTL]} />
+          <View style={[styles.corner, styles.cornerTR]} />
+          <View style={[styles.corner, styles.cornerBL]} />
+          <View style={[styles.corner, styles.cornerBR]} />
+        </View>
 
-      <View style={styles.controls}>
         {showLog ? (
           <View style={styles.logBox}>
             {logLines.length === 0 ? (
@@ -582,52 +591,65 @@ export function ScanScreen({
             )}
           </View>
         ) : null}
-        <Pressable style={styles.statusBar} onPress={toggleLog}>
-          {!modelsReady ? <ActivityIndicator color={theme.accent} /> : null}
-          <Text style={styles.statusText}>
-            {status}
-            {scanning && elapsed > 0 ? ` (${elapsed}s)` : ''}
-          </Text>
-          {syncing ? (
-            <Text style={styles.warning}>Updating catalogue…</Text>
-          ) : !indexReady ? (
-            <Text style={styles.warning}>No card index yet — it downloads on first sync.</Text>
-          ) : null}
-          <Text style={styles.logHint}>{showLog ? 'tap to hide log' : 'tap for log'}</Text>
-        </Pressable>
-
-        <Pressable
-          accessibilityRole="switch"
-          accessibilityState={{ checked: autoScan }}
-          accessibilityLabel="Auto-scan"
-          onPress={() => onAutoScanChange(!autoScan)}
-          style={[styles.autoPill, autoScan && styles.autoPillOn]}
-        >
-          <Text style={[styles.autoPillText, autoScan && styles.autoPillTextOn]}>
-            {autoScan ? 'Auto-scan on — hold a card steady' : 'Auto-scan off'}
-          </Text>
-        </Pressable>
-
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Scan card"
-          disabled={!ready || scanning}
-          onPress={requestScan}
-          style={[styles.shutter, (!ready || scanning) && styles.shutterDisabled]}
-        >
-          {scanning ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.shutterText}>Scan</Text>
-          )}
-        </Pressable>
       </View>
 
-      {added ? (
-        <View style={styles.toastSlot} pointerEvents="box-none">
-          <AddedToast added={added} onUndo={() => void undoAdd()} onDismiss={() => setAdded(null)} />
+      {/* Solid panel: status, the two buttons, and the popup for a card just added. */}
+      <View style={styles.panel}>
+        <Pressable style={styles.statusBar} onPress={toggleLog}>
+          <View style={styles.statusLine}>
+            {!modelsReady ? <ActivityIndicator color={theme.accent} size="small" /> : null}
+            <Text style={styles.statusText} numberOfLines={2}>
+              {status}
+              {scanning && elapsed > 0 ? ` (${elapsed}s)` : ''}
+            </Text>
+          </View>
+          {syncing ? (
+            <Text style={styles.warning} numberOfLines={1}>
+              Updating catalogue…
+            </Text>
+          ) : !indexReady ? (
+            <Text style={styles.warning} numberOfLines={1}>
+              No card index yet — it downloads on first sync.
+            </Text>
+          ) : null}
+        </Pressable>
+
+        <View style={styles.buttonRow}>
+          <Pressable
+            accessibilityRole="switch"
+            accessibilityState={{ checked: autoScan }}
+            accessibilityLabel="Auto-scan"
+            onPress={() => onAutoScanChange(!autoScan)}
+            style={[styles.autoButton, autoScan && styles.autoButtonOn]}
+          >
+            <Text style={[styles.autoButtonText, autoScan && styles.autoButtonTextOn]} numberOfLines={1}>
+              {autoScan ? 'Auto-scan on' : 'Auto-scan off'}
+            </Text>
+          </Pressable>
+
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Scan card"
+            disabled={!ready || scanning}
+            onPress={requestScan}
+            style={[styles.shutter, (!ready || scanning) && styles.shutterDisabled]}
+          >
+            {scanning ? (
+              <ActivityIndicator color={theme.onAccent} />
+            ) : (
+              <Text style={styles.shutterText}>Scan</Text>
+            )}
+          </Pressable>
+
+          <Pressable style={styles.logButton} onPress={toggleLog} accessibilityLabel={showLog ? 'Hide log' : 'Show log'}>
+            <Text style={styles.logButtonText}>{showLog ? 'Hide log' : 'Log'}</Text>
+          </Pressable>
         </View>
-      ) : null}
+
+        <View style={styles.toastSlot}>
+          {added ? <AddedToast added={added} onUndo={() => void undoAdd()} onDismiss={() => setAdded(null)} /> : null}
+        </View>
+      </View>
     </View>
   );
 }
@@ -650,94 +672,109 @@ const styles = StyleSheet.create({
     paddingVertical: theme.spacing(1.5),
     borderRadius: theme.radius,
   },
-  buttonText: { color: '#fff', fontWeight: '600' },
+  buttonText: { color: theme.onAccent, fontWeight: '700' },
+  viewfinder: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: PANEL_HEIGHT,
+  },
+  // Where to put the card: clear of the game chips above and the panel below.
   frameGuide: {
     position: 'absolute',
-    left: '10%',
-    right: '10%',
-    top: '18%',
-    bottom: '30%',
-    borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.45)',
-    borderRadius: 16,
+    left: '9%',
+    right: '9%',
+    top: topInset + 56,
+    bottom: theme.spacing(2),
   },
+  corner: { position: 'absolute', width: 34, height: 34, borderColor: theme.accent },
+  cornerTL: { top: 0, left: 0, borderTopWidth: 4, borderLeftWidth: 4, borderTopLeftRadius: 14 },
+  cornerTR: { top: 0, right: 0, borderTopWidth: 4, borderRightWidth: 4, borderTopRightRadius: 14 },
+  cornerBL: { bottom: 0, left: 0, borderBottomWidth: 4, borderLeftWidth: 4, borderBottomLeftRadius: 14 },
+  cornerBR: { bottom: 0, right: 0, borderBottomWidth: 4, borderRightWidth: 4, borderBottomRightRadius: 14 },
   gameRow: {
     position: 'absolute',
-    top: theme.spacing(7),
+    top: topInset + theme.spacing(1),
     left: 0,
     right: 0,
     flexDirection: 'row',
-    flexWrap: 'wrap',
     justifyContent: 'center',
-    gap: theme.spacing(1),
-    paddingHorizontal: theme.spacing(2),
+    gap: theme.spacing(0.75),
+    paddingHorizontal: theme.spacing(1.5),
   },
   gameChip: {
-    paddingHorizontal: theme.spacing(1.5),
+    paddingHorizontal: theme.spacing(1.25),
     paddingVertical: theme.spacing(0.75),
     borderRadius: 999,
-    backgroundColor: 'rgba(11,14,20,0.75)',
+    backgroundColor: 'rgba(18,19,22,0.78)',
     borderWidth: 1,
     borderColor: theme.border,
   },
   gameChipActive: { backgroundColor: theme.accent, borderColor: theme.accent },
-  gameChipText: { color: theme.textMuted, fontSize: 12 },
-  gameChipTextActive: { color: '#fff', fontWeight: '600' },
-  // Room under the shutter for the "added" popup.
-  toastSlot: {
+  gameChipText: { color: theme.textMuted, fontSize: 12, fontWeight: '600' },
+  gameChipTextActive: { color: theme.onAccent, fontWeight: '700' },
+  panel: {
     position: 'absolute',
-    bottom: theme.spacing(1.5),
-    left: theme.spacing(2),
-    right: theme.spacing(2),
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: PANEL_HEIGHT,
+    backgroundColor: theme.surface,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: theme.spacing(2),
+    paddingTop: theme.spacing(1.5),
+    gap: theme.spacing(1.25),
   },
-  controls: {
-    position: 'absolute',
-    bottom: theme.spacing(11),
-    left: theme.spacing(2),
-    right: theme.spacing(2),
-    alignItems: 'center',
-    gap: theme.spacing(1.5),
-  },
-  statusBar: {
-    alignSelf: 'stretch',
-    alignItems: 'center',
-    gap: theme.spacing(0.5),
-    backgroundColor: 'rgba(11,14,20,0.8)',
-    borderRadius: theme.radius,
-    padding: theme.spacing(1.5),
-  },
-  statusText: { color: theme.text, fontSize: 15, textAlign: 'center' },
+  statusBar: { minHeight: 44, justifyContent: 'center', gap: 2 },
+  statusLine: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: theme.spacing(1) },
+  statusText: { color: theme.text, fontSize: 14, textAlign: 'center', flexShrink: 1 },
   warning: { color: theme.check, fontSize: 12, textAlign: 'center' },
-  logHint: { color: theme.textMuted, fontSize: 10, textAlign: 'center' },
-  autoPill: {
-    alignSelf: 'center',
-    paddingHorizontal: theme.spacing(1.5),
-    paddingVertical: theme.spacing(0.75),
-    borderRadius: 999,
-    backgroundColor: 'rgba(11,14,20,0.75)',
+  buttonRow: { flexDirection: 'row', alignItems: 'center', gap: theme.spacing(1.25) },
+  autoButton: {
+    width: 104,
+    height: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: theme.radius,
+    backgroundColor: theme.surfaceAlt,
     borderWidth: 1,
     borderColor: theme.border,
   },
-  autoPillOn: { borderColor: theme.accent },
-  autoPillText: { color: theme.textMuted, fontSize: 12 },
-  autoPillTextOn: { color: theme.text },
+  autoButtonOn: { borderColor: theme.accent, backgroundColor: theme.accentSoft },
+  autoButtonText: { color: theme.textMuted, fontSize: 12, fontWeight: '600' },
+  autoButtonTextOn: { color: theme.accent },
+  shutter: {
+    flex: 1,
+    height: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.accent,
+    borderRadius: theme.radius,
+  },
+  shutterDisabled: { opacity: 0.45 },
+  shutterText: { color: theme.onAccent, fontSize: 17, fontWeight: '800' },
+  logButton: {
+    width: 64,
+    height: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: theme.radius,
+    backgroundColor: theme.surfaceAlt,
+  },
+  logButtonText: { color: theme.textMuted, fontSize: 12, fontWeight: '600' },
+  // Reserved so the popup appearing never moves the buttons.
+  toastSlot: { height: 56, justifyContent: 'center' },
   logBox: {
-    alignSelf: 'stretch',
+    position: 'absolute',
+    left: theme.spacing(1.5),
+    right: theme.spacing(1.5),
+    bottom: theme.spacing(1),
     gap: 1,
     backgroundColor: 'rgba(0,0,0,0.85)',
     borderRadius: theme.radius,
     padding: theme.spacing(1),
   },
   logText: { color: '#9fe870', fontSize: 10, fontFamily: 'monospace' },
-  shutter: {
-    minWidth: 200,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: theme.accent,
-    paddingHorizontal: theme.spacing(4),
-    paddingVertical: theme.spacing(2),
-    borderRadius: 999,
-  },
-  shutterDisabled: { opacity: 0.5 },
-  shutterText: { color: '#fff', fontSize: 17, fontWeight: '700' },
 });

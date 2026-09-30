@@ -44,5 +44,5 @@ const styles = StyleSheet.create({
   },
   chipSelected: { backgroundColor: theme.accent, borderColor: theme.accent },
   text: { color: theme.textMuted, fontSize: 13, fontWeight: '600' },
-  textSelected: { color: '#fff' },
+  textSelected: { color: theme.onAccent, fontWeight: '700' },
 });

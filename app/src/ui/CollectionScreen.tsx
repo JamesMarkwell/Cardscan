@@ -39,6 +39,7 @@ import { CardDetailModal } from './CardDetailModal';
 import { CardImage } from './CardImage';
 import { Chips } from './Chips';
 import { useCurrency, withDisplayCurrency } from './CurrencyContext';
+import { topInset } from './layout';
 import { theme } from './theme';
 
 type ViewMode = 'list' | 'grid';
@@ -398,7 +399,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     padding: theme.spacing(2.5),
-    paddingTop: theme.spacing(7),
+    paddingTop: topInset + theme.spacing(1.5),
     paddingBottom: theme.spacing(1.5),
   },
   summaryRight: { alignItems: 'flex-end' },
@@ -409,7 +410,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: theme.spacing(2.5),
-    paddingTop: theme.spacing(7),
+    paddingTop: topInset + theme.spacing(1.5),
     paddingBottom: theme.spacing(2),
   },
   selectCount: { color: theme.text, fontSize: 18, fontWeight: '700' },
@@ -443,7 +444,7 @@ const styles = StyleSheet.create({
   },
   sortText: { color: theme.text, fontSize: 14, fontWeight: '600' },
   toolOn: { backgroundColor: theme.accent },
-  toolOnText: { color: '#fff' },
+  toolOnText: { color: theme.onAccent },
   filterNote: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: theme.spacing(0.5) },
   filterText: { color: theme.textMuted, fontSize: 12 },
   clear: { color: theme.accent, fontSize: 12, fontWeight: '700' },
@@ -501,7 +502,7 @@ const styles = StyleSheet.create({
   markInline: {},
   markOverlay: { position: 'absolute', top: 6, left: 6 },
   markOn: { backgroundColor: theme.accent, borderColor: theme.accent },
-  markText: { color: '#fff', fontSize: 14, fontWeight: '800', lineHeight: 16 },
+  markText: { color: theme.onAccent, fontSize: 14, fontWeight: '800', lineHeight: 16 },
   deleteBar: {
     position: 'absolute',
     left: 0,
@@ -525,7 +526,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     elevation: 6,
   },
-  fabText: { color: '#fff', fontSize: 30, lineHeight: 34, fontWeight: '500' },
+  fabText: { color: theme.onAccent, fontSize: 30, lineHeight: 34, fontWeight: '500' },
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   sheet: {
     backgroundColor: theme.surfaceAlt,

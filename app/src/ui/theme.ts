@@ -1,11 +1,17 @@
+/** CardScan's look: dark grey surfaces with an orange accent. */
 export const theme = {
-  background: '#0B0E14',
-  surface: '#141A23',
-  surfaceAlt: '#1D2733',
-  border: '#27313F',
-  text: '#F2F5F9',
-  textMuted: '#8A97A8',
-  accent: '#4C8DFF',
+  background: '#121316',
+  surface: '#1C1E23',
+  surfaceAlt: '#262930',
+  border: '#33363E',
+  text: '#F5F3EF',
+  textMuted: '#9A9EA8',
+  /** The brand orange. */
+  accent: '#FF7A1A',
+  /** A faint orange wash for selected/active backgrounds. */
+  accentSoft: 'rgba(255,122,26,0.16)',
+  /** Text and icons that sit on the orange (dark, for contrast). */
+  onAccent: '#14110D',
   high: '#3DD68C',
   check: '#F5B942',
   low: '#F2686B',

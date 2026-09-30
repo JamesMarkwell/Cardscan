@@ -8,6 +8,7 @@ import { VARIANTS } from './CardDetailModal';
 import { CardImage } from './CardImage';
 import { Chips } from './Chips';
 import { useCurrency, withDisplayCurrency } from './CurrencyContext';
+import { topInset } from './layout';
 import { theme } from './theme';
 
 const PAGE = 40;
@@ -206,7 +207,7 @@ export function AddCardModal({
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: theme.background, paddingTop: theme.spacing(6), paddingHorizontal: theme.spacing(2) },
+  container: { flex: 1, backgroundColor: theme.background, paddingTop: topInset + theme.spacing(1), paddingHorizontal: theme.spacing(2) },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: theme.spacing(1.5) },
   title: { color: theme.text, fontSize: 22, fontWeight: '700' },
   done: { color: theme.accent, fontSize: 16, fontWeight: '600' },
@@ -259,5 +260,5 @@ const styles = StyleSheet.create({
   stepText: { color: theme.text, fontSize: 22, fontWeight: '600' },
   quantity: { color: theme.text, fontSize: 20, fontWeight: '700', minWidth: 24, textAlign: 'center' },
   addButton: { backgroundColor: theme.accent, borderRadius: theme.radius, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(1.5) },
-  addText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  addText: { color: theme.onAccent, fontSize: 15, fontWeight: '700' },
 });
