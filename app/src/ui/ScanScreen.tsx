@@ -42,6 +42,7 @@ import {
 import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { AddedCard, AddedToast } from './AddedToast';
+import { GamePicker } from './GamePicker';
 import { topInset } from './layout';
 import { theme } from './theme';
 
@@ -58,7 +59,7 @@ const CAPTURE_FPS = 10;
 // than spin forever (e.g. the stream stalled).
 const CAPTURE_TIMEOUT_MS = 6000;
 // Height of the solid control panel at the bottom; the camera view above it is what the card is framed in.
-const PANEL_HEIGHT = 244;
+const PANEL_HEIGHT = 204;
 // An auto frame of the same scene as the last auto scan, this soon after it, is a repeat.
 const REPEAT_WINDOW_MS = 30_000;
 
@@ -577,18 +578,8 @@ export function ScanScreen({
 
       {/* The camera view above the control panel: the card goes in the frame, and nothing overlaps it. */}
       <View style={styles.viewfinder} pointerEvents="box-none">
-        <View style={styles.gameRow}>
-          {GAMES.map((game) => (
-            <Pressable
-              key={game.id}
-              onPress={() => onGameChange(game.id)}
-              style={[styles.gameChip, game.id === gameId && styles.gameChipActive]}
-            >
-              <Text style={[styles.gameChipText, game.id === gameId && styles.gameChipTextActive]} numberOfLines={1}>
-                {game.name}
-              </Text>
-            </Pressable>
-          ))}
+        <View style={styles.gameRow} pointerEvents="box-none">
+          <GamePicker gameId={gameId} onChange={onGameChange} />
         </View>
 
         <View pointerEvents="none" style={styles.frameGuide}>
@@ -705,7 +696,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: '9%',
     right: '9%',
-    top: topInset + 56,
+    top: topInset + 64,
     bottom: theme.spacing(2),
   },
   corner: { position: 'absolute', width: 34, height: 34, borderColor: theme.accent },
@@ -718,22 +709,7 @@ const styles = StyleSheet.create({
     top: topInset + theme.spacing(1),
     left: 0,
     right: 0,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: theme.spacing(0.75),
-    paddingHorizontal: theme.spacing(1.5),
   },
-  gameChip: {
-    paddingHorizontal: theme.spacing(1.25),
-    paddingVertical: theme.spacing(0.75),
-    borderRadius: 999,
-    backgroundColor: 'rgba(18,19,22,0.78)',
-    borderWidth: 1,
-    borderColor: theme.border,
-  },
-  gameChipActive: { backgroundColor: theme.accent, borderColor: theme.accent },
-  gameChipText: { color: theme.textMuted, fontSize: 12, fontWeight: '600' },
-  gameChipTextActive: { color: theme.onAccent, fontWeight: '700' },
   panel: {
     position: 'absolute',
     left: 0,
@@ -753,7 +729,7 @@ const styles = StyleSheet.create({
   warning: { color: theme.check, fontSize: 12, textAlign: 'center' },
   buttonRow: { flexDirection: 'row', alignItems: 'center', gap: theme.spacing(1.25) },
   autoButton: {
-    width: 104,
+    width: 108,
     height: 52,
     alignItems: 'center',
     justifyContent: 'center',
@@ -776,7 +752,7 @@ const styles = StyleSheet.create({
   shutterDisabled: { opacity: 0.45 },
   shutterText: { color: theme.onAccent, fontSize: 17, fontWeight: '800' },
   logButton: {
-    width: 64,
+    width: 68,
     height: 52,
     alignItems: 'center',
     justifyContent: 'center',
@@ -785,7 +761,7 @@ const styles = StyleSheet.create({
   },
   logButtonText: { color: theme.textMuted, fontSize: 12, fontWeight: '600' },
   // Reserved so the popup appearing never moves the buttons.
-  toastSlot: { height: 56, justifyContent: 'center' },
+  toastSlot: { height: 52, justifyContent: 'center' },
   logBox: {
     position: 'absolute',
     left: theme.spacing(1.5),

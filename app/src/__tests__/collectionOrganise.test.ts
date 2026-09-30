@@ -4,6 +4,9 @@ import {
   applyFilters,
   formatMoney,
   gamesPresent,
+  mostValuable,
+  recentlyAdded,
+  valueByGame,
   rowValue,
   sortLabel,
   sortRows,
@@ -174,5 +177,25 @@ describe('bestPrice', () => {
   it('is null when nothing has a price', () => {
     expect(bestPrice([])).toBeNull();
     expect(bestPrice([price('tcgplayer', {})])).toBeNull();
+  });
+});
+
+describe('the home overview', () => {
+  it('valueByGame totals each game and lists the most valuable first', () => {
+    const totals = valueByGame(collection());
+    // pokemon: Pikachu 10 + Charizard 200 + Mystery 0; onepiece: Luffy 12
+    expect(totals.map((t) => t.gameId)).toEqual(['pokemon', 'onepiece']);
+    expect(totals[0]).toMatchObject({ value: 210, cards: 4, unique: 3 });
+    expect(totals[1]).toMatchObject({ value: 12, cards: 4, unique: 1 });
+  });
+
+  it('mostValuable ranks by the stack, leaves out unpriced cards and honours the limit', () => {
+    const names = mostValuable(collection(), 2).map((r) => r.printing.name);
+    expect(names).toEqual(['Charizard', 'Monkey D. Luffy']);
+    expect(mostValuable(collection(), 10).map((r) => r.printing.name)).not.toContain('Mystery');
+  });
+
+  it('recentlyAdded is newest first', () => {
+    expect(recentlyAdded(collection(), 2).map((r) => r.printing.name)).toEqual(['Mystery', 'Charizard']);
   });
 });

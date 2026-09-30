@@ -1,7 +1,7 @@
 /** App shell: three tabs, one shared scan service. */
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { StoredRates, fetchRates, loadRates, ratesAreStale } from './src/data/currency';
 import { openDatabase } from './src/data/db';
 import { crumb } from './src/debug/breadcrumbs';
@@ -14,17 +14,21 @@ import { ScanResult, ScanService } from './src/scan/scanService';
 import { readSerial } from './src/scan/serialOcr';
 import { CollectionScreen } from './src/ui/CollectionScreen';
 import { CurrencyProvider } from './src/ui/CurrencyContext';
+import { HomeScreen } from './src/ui/HomeScreen';
+import { Icon, IconName } from './src/ui/Icon';
+import type { SortKey } from './src/collection/organise';
 import { ResultSheet } from './src/ui/ResultSheet';
 import { ScanScreen } from './src/ui/ScanScreen';
 import { SettingsScreen } from './src/ui/SettingsScreen';
 import { theme } from './src/ui/theme';
 
-type Tab = 'scan' | 'collection' | 'settings';
+type Tab = 'home' | 'scan' | 'collection' | 'settings';
 
-const TABS: Array<{ id: Tab; label: string; icon: number }> = [
-  { id: 'scan', label: 'Scan', icon: require('./assets/tabs/scan.png') },
-  { id: 'collection', label: 'Collection', icon: require('./assets/tabs/collection.png') },
-  { id: 'settings', label: 'Settings', icon: require('./assets/tabs/settings.png') },
+const TABS: Array<{ id: Tab; label: string; icon: IconName }> = [
+  { id: 'home', label: 'Home', icon: 'home' },
+  { id: 'scan', label: 'Scan', icon: 'scan' },
+  { id: 'collection', label: 'Collection', icon: 'collection' },
+  { id: 'settings', label: 'Settings', icon: 'settings' },
 ];
 
 export default function App() {
@@ -32,6 +36,8 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
   const [result, setResult] = useState<ScanResult | null>(null);
   const [collectionKey, setCollectionKey] = useState(0);
+  // "View all" on Home opens the collection sorted by price; a new nonce re-applies it.
+  const [sortRequest, setSortRequest] = useState<{ sort: SortKey; nonce: number } | undefined>();
   const [indexReady, setIndexReady] = useState(false);
   const [syncing, setSyncing] = useState(false);
   // Exchange rates for showing prices in the chosen currency; refreshed in the
@@ -145,7 +151,19 @@ export default function App() {
               }}
             />
           ) : null}
-          {tab === 'collection' ? <CollectionScreen reloadKey={collectionKey} /> : null}
+          {tab === 'home' ? (
+            <HomeScreen
+              reloadKey={collectionKey}
+              onScan={() => setTab('scan')}
+              onViewAll={() => {
+                setSortRequest((current) => ({ sort: 'price', nonce: (current?.nonce ?? 0) + 1 }));
+                setTab('collection');
+              }}
+            />
+          ) : null}
+          {tab === 'collection' ? (
+            <CollectionScreen reloadKey={collectionKey} onScan={() => setTab('scan')} sortRequest={sortRequest} />
+          ) : null}
           {tab === 'settings' ? (
             <SettingsScreen
               settings={settings}
@@ -155,24 +173,26 @@ export default function App() {
           ) : null}
         </View>
 
-        <View style={styles.tabBar}>
-          {TABS.map((entry) => {
-            const active = tab === entry.id;
-            return (
-              <Pressable
-                key={entry.id}
-                style={styles.tab}
-                onPress={() => setTab(entry.id)}
-                accessibilityRole="tab"
-                accessibilityState={{ selected: active }}
-              >
-                <Image source={entry.icon} style={[styles.tabIcon, { tintColor: active ? theme.accent : theme.textMuted }]} />
-                <Text style={[styles.tabText, active && styles.tabTextActive]} numberOfLines={1}>
-                  {entry.label}
-                </Text>
-              </Pressable>
-            );
-          })}
+        <View style={styles.tabBarWrap}>
+          <View style={styles.tabBar}>
+            {TABS.map((entry) => {
+              const active = tab === entry.id;
+              return (
+                <Pressable
+                  key={entry.id}
+                  style={[styles.tab, active && styles.tabActive]}
+                  onPress={() => setTab(entry.id)}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: active }}
+                >
+                  <Icon name={entry.icon} size={22} color={active ? theme.accent : theme.textMuted} />
+                  <Text style={[styles.tabText, active && styles.tabTextActive]} numberOfLines={1}>
+                    {entry.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
         </View>
 
         <ResultSheet
@@ -189,16 +209,19 @@ export default function App() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.background },
   screen: { flex: 1 },
+  // The bar floats as a rounded pill above the screen edge, with the active tab highlighted.
+  tabBarWrap: { paddingHorizontal: theme.spacing(2), paddingTop: theme.spacing(1), paddingBottom: theme.spacing(2), backgroundColor: theme.background },
   tabBar: {
     flexDirection: 'row',
     backgroundColor: theme.surface,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: theme.border,
-    paddingBottom: theme.spacing(3),
-    paddingTop: theme.spacing(1),
+    borderWidth: 1,
+    borderColor: theme.border,
+    borderRadius: 32,
+    padding: 6,
+    gap: 4,
   },
-  tab: { flex: 1, alignItems: 'center', gap: 3 },
-  tabIcon: { width: 24, height: 24 },
+  tab: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 3, height: 54, borderRadius: 26 },
+  tabActive: { backgroundColor: theme.accentSoft },
   tabText: { color: theme.textMuted, fontSize: 11, fontWeight: '700' },
   tabTextActive: { color: theme.accent },
 });

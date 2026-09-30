@@ -116,7 +116,7 @@ export function AddCardModal({
         <TextInput
           value={query}
           onChangeText={setQuery}
-          placeholder="Name, set or number — e.g. charizard base, OP17 070"
+          placeholder="Search name, set or number"
           placeholderTextColor={theme.textMuted}
           style={styles.input}
           autoFocus
@@ -215,8 +215,10 @@ const styles = StyleSheet.create({
     backgroundColor: theme.surface,
     color: theme.text,
     borderRadius: theme.radius,
+    height: 48,
     paddingHorizontal: theme.spacing(2),
-    paddingVertical: theme.spacing(1.5),
+    paddingVertical: 0,
+    textAlignVertical: 'center',
     fontSize: 15,
     marginBottom: theme.spacing(1),
   },

@@ -133,3 +133,36 @@ export function bestPrice(prices: Price[]): { value: number; currency: string } 
   }
   return null;
 }
+
+export interface GameTotal {
+  gameId: GameId;
+  value: number;
+  cards: number;
+  unique: number;
+}
+
+/** What each game's cards are worth, biggest first. */
+export function valueByGame(rows: CollectionRow[]): GameTotal[] {
+  const totals = new Map<GameId, GameTotal>();
+  for (const row of rows) {
+    const total = totals.get(row.printing.gameId) ?? { gameId: row.printing.gameId, value: 0, cards: 0, unique: 0 };
+    total.value += rowValue(row);
+    total.cards += row.quantity;
+    total.unique += 1;
+    totals.set(row.printing.gameId, total);
+  }
+  return [...totals.values()].sort((a, b) => b.value - a.value || b.cards - a.cards);
+}
+
+/** The rows worth the most in total (priced ones only), biggest first. */
+export function mostValuable(rows: CollectionRow[], limit: number): CollectionRow[] {
+  return rows
+    .filter((row) => row.market !== null)
+    .sort((a, b) => rowValue(b) - rowValue(a))
+    .slice(0, limit);
+}
+
+/** The most recently added rows, newest first. */
+export function recentlyAdded(rows: CollectionRow[], limit: number): CollectionRow[] {
+  return sortRows(rows, 'recent').slice(0, limit);
+}

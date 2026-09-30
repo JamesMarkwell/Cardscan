@@ -26,3 +26,12 @@ export const tierLabel = {
   check: 'Worth a check',
   low: 'Not sure — pick one',
 } as const;
+
+/** A colour per game, for charts and tags. */
+export const gameColour: Record<string, string> = {
+  onepiece: '#FF7A1A',
+  pokemon: '#F5B942',
+  mtg: '#3DD68C',
+  yugioh: '#4C8DFF',
+  lorcana: '#B07CFF',
+};
