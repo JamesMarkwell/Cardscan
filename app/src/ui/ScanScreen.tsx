@@ -79,6 +79,9 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   // Tap the status bar to show the step log (survives a crash — see breadcrumbs).
   const [showLog, setShowLog] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
+  // Seconds since the current scan began, so a slow step can be told apart from
+  // a frozen app (the counter keeps ticking only while the JS thread is free).
+  const [elapsed, setElapsed] = useState(0);
 
   const mounted = useRef(true);
   // True from the moment Scan is tapped until we've consumed one frame. Guards
@@ -111,11 +114,29 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     crumb(`render: grabbing=${grabbing}`);
   }, [grabbing]);
 
-  const toggleLog = () => {
-    const next = !showLog;
-    setShowLog(next);
-    if (next) void readCrumbs(16).then((lines) => mounted.current && setLogLines(lines));
-  };
+  // While the log is open, keep it live so the steps of a running scan appear as
+  // they are written instead of showing a stale snapshot.
+  useEffect(() => {
+    if (!showLog) return undefined;
+    const refresh = () => {
+      void readCrumbs(16).then((lines) => mounted.current && setLogLines(lines));
+    };
+    refresh();
+    const id = setInterval(refresh, 700);
+    return () => clearInterval(id);
+  }, [showLog]);
+
+  useEffect(() => {
+    if (!scanning) {
+      setElapsed(0);
+      return undefined;
+    }
+    const started = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [scanning]);
+
+  const toggleLog = () => setShowLog((open) => !open);
 
   useEffect(() => {
     let cancelled = false;
@@ -343,7 +364,10 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
         ) : null}
         <Pressable style={styles.statusBar} onPress={toggleLog}>
           {!modelsReady ? <ActivityIndicator color={theme.accent} /> : null}
-          <Text style={styles.statusText}>{status}</Text>
+          <Text style={styles.statusText}>
+            {status}
+            {scanning && elapsed > 0 ? ` (${elapsed}s)` : ''}
+          </Text>
           {syncing ? (
             <Text style={styles.warning}>Updating catalogue…</Text>
           ) : !indexReady ? (
