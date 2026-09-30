@@ -12,15 +12,17 @@
  * work here is the camera's *frame output* — raw RGB buffers delivered on the
  * frame-processor worklet thread, never encoded, the same mechanism the old live
  * scanner used. Live scanning froze the UI only because it marshalled every
- * frame to the JS thread; here the worklet discards every frame for free until
- * the user taps Scan, at which point it copies exactly one frame's pixels over.
- * So there is no JPEG, no native image library, and no per-frame JS work.
+ * frame to the JS thread; here the installed worklet discards every frame for
+ * free until the user taps Scan, at which point React state swaps in a worklet
+ * that copies exactly one frame's pixels over. So there is no JPEG, no native
+ * image library, no per-frame JS work, and no cross-thread flag: the worklet
+ * itself is the switch.
  */
 import * as Haptics from 'expo-haptics';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, useFrameOutput, usePreviewOutput } from 'react-native-vision-camera';
-import { createSynchronizable, runOnJS } from 'react-native-worklets';
+import { runOnJS } from 'react-native-worklets';
 import { GAMES, GameId } from '../data/types';
 import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
@@ -68,27 +70,17 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   const [status, setStatus] = useState('Starting camera');
   const [modelsReady, setModelsReady] = useState(false);
   const [scanning, setScanning] = useState(false);
+  // Which frame worklet is installed on the camera thread. false: discard every
+  // frame. true: grab one. It is plain React state — the hook re-sends the
+  // worklet to the camera thread whenever it changes — so there is no shared
+  // cross-thread flag to get wrong.
+  const [grabbing, setGrabbing] = useState(false);
 
   const mounted = useRef(true);
   // True from the moment Scan is tapped until we've consumed one frame. Guards
   // against a stray frame being processed and against double-taps.
   const awaitingCapture = useRef(false);
   const watchdog = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Set true once the worklet has ever run, so a capture timeout can tell "the
-  // camera isn't delivering frames at all" apart from "frames flow but the grab
-  // didn't complete".
-  const cameraStreaming = useRef(false);
-  const onStreaming = useCallback(() => {
-    cameraStreaming.current = true;
-  }, []);
-  // Cross-runtime flags the worklet reads each frame. Read them with
-  // getBlocking() (a synchronised read): getDirty() is a fast, possibly-stale
-  // read that can miss the write the JS thread just made, so the worklet would
-  // never see the capture request. Set true on tap; the worklet clears it as
-  // soon as it grabs the next frame.
-  const captureRequest = useMemo(() => createSynchronizable(false), []);
-  // One-shot: flipped true by the worklet on its first-ever frame.
-  const streamSignaled = useMemo(() => createSynchronizable(false), []);
 
   useEffect(() => {
     mounted.current = true;
@@ -131,10 +123,13 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     (data: Uint8Array, width: number, height: number) => {
       if (!awaitingCapture.current || !mounted.current) return;
       awaitingCapture.current = false;
+      // Swap back to the discard worklet so no further frames are copied.
+      setGrabbing(false);
       if (watchdog.current) {
         clearTimeout(watchdog.current);
         watchdog.current = null;
       }
+      setStatus(`Got frame ${width}×${height}…`);
       const frame: RgbaImage = { data, width, height };
       void service
         .scanImageOnce(frame, (stage) => {
@@ -166,75 +161,92 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     [onResult, service],
   );
 
+  // The grab worklet threw. Surface the reason on screen and reset the shutter,
+  // so a failure in the camera thread is visible rather than a silent stall.
+  const onGrabError = useCallback((message: string) => {
+    if (!awaitingCapture.current || !mounted.current) return;
+    awaitingCapture.current = false;
+    setGrabbing(false);
+    if (watchdog.current) {
+      clearTimeout(watchdog.current);
+      watchdog.current = null;
+    }
+    setScanning(false);
+    setStatus(`Frame grab failed: ${message}`);
+  }, []);
+
   const frameOutput = useFrameOutput({
     pixelFormat: 'rgb',
     targetResolution: FRAME_RESOLUTION,
     // Hand us a display-upright buffer so the card is the right way up for the
     // detector, regardless of sensor orientation.
     enablePhysicalBufferRotation: true,
-    onFrame: (frame) => {
-      'worklet';
-      // Signal, exactly once, that frames are actually being delivered.
-      if (!streamSignaled.getBlocking()) {
-        streamSignaled.setBlocking(true);
-        runOnJS(onStreaming)();
-      }
-      // Do nothing — and cost the JS thread nothing — until a capture is asked
-      // for. This is what keeps the UI responsive while the preview streams.
-      if (!captureRequest.getBlocking()) {
-        frame.dispose();
-        return;
-      }
-      captureRequest.setBlocking(false);
-      const plane = frame.getPlanes()[0];
-      if (plane == null) {
-        frame.dispose();
-        return;
-      }
-      const width = plane.width;
-      const height = plane.height;
-      const bytesPerRow = plane.bytesPerRow;
-      const src = new Uint8Array(plane.getPixelBuffer());
-      // 'rgb' is 3 bytes/pixel, but some pipelines negotiate a 4-byte layout;
-      // derive it from the row stride and copy into compact RGBA.
-      const channels = Math.max(3, Math.round(bytesPerRow / width));
-      const out = new Uint8Array(width * height * 4);
-      for (let y = 0; y < height; y += 1) {
-        const row = y * bytesPerRow;
-        for (let x = 0; x < width; x += 1) {
-          const s = row + x * channels;
-          const d = (y * width + x) * 4;
-          out[d] = src[s];
-          out[d + 1] = src[s + 1];
-          out[d + 2] = src[s + 2];
-          out[d + 3] = 255;
+    // Idle: throw every frame away for free. This is what keeps the UI
+    // responsive while the preview streams. Tapping Scan flips `grabbing`, which
+    // installs the grab worklet below in its place.
+    onFrame: grabbing
+      ? (frame) => {
+          'worklet';
+          let out: Uint8Array | null = null;
+          let width = 0;
+          let height = 0;
+          let failure: string | null = null;
+          try {
+            const plane = frame.getPlanes()[0];
+            if (plane == null) throw new Error('frame has no pixel plane');
+            width = plane.width;
+            height = plane.height;
+            const bytesPerRow = plane.bytesPerRow;
+            const src = new Uint8Array(plane.getPixelBuffer());
+            // 'rgb' is 3 bytes/pixel, but some pipelines negotiate a 4-byte
+            // layout; derive it from the row stride and copy into compact RGBA.
+            const channels = Math.max(3, Math.round(bytesPerRow / width));
+            out = new Uint8Array(width * height * 4);
+            for (let y = 0; y < height; y += 1) {
+              const row = y * bytesPerRow;
+              for (let x = 0; x < width; x += 1) {
+                const s = row + x * channels;
+                const d = (y * width + x) * 4;
+                out[d] = src[s];
+                out[d + 1] = src[s + 1];
+                out[d + 2] = src[s + 2];
+                out[d + 3] = 255;
+              }
+            }
+          } catch (error) {
+            failure = String(error);
+          }
+          frame.dispose();
+          if (failure != null || out == null) {
+            runOnJS(onGrabError)(failure ?? 'no pixels');
+          } else {
+            runOnJS(onCapturedFrame)(out, width, height);
+          }
         }
-      }
-      frame.dispose();
-      runOnJS(onCapturedFrame)(out, width, height);
-    },
+      : (frame) => {
+          'worklet';
+          frame.dispose();
+        },
   });
 
-  // The manual shutter: ask the worklet to grab the next frame.
+  // The manual shutter: install the grab worklet so the next frame is captured.
   const requestScan = () => {
     if (!ready || awaitingCapture.current) return;
     awaitingCapture.current = true;
     setScanning(true);
     setStatus('Capturing…');
-    captureRequest.setBlocking(true);
+    // Start the watchdog before anything that could throw, so the shutter can
+    // never be left spinning with nothing scheduled to reset it.
     watchdog.current = setTimeout(() => {
       if (!awaitingCapture.current) return;
       awaitingCapture.current = false;
-      captureRequest.setBlocking(false);
+      setGrabbing(false);
       if (mounted.current) {
         setScanning(false);
-        setStatus(
-          cameraStreaming.current
-            ? 'Couldn’t grab a frame — try again'
-            : 'Camera isn’t delivering frames — try again',
-        );
+        setStatus('No camera frame arrived in 6s — try again');
       }
     }, CAPTURE_TIMEOUT_MS);
+    setGrabbing(true);
   };
 
   if (!hasPermission) {
