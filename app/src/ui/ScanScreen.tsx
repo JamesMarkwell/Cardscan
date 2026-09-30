@@ -1,9 +1,11 @@
 /**
- * Camera screen: live preview with a manual shutter.
+ * Camera screen: live preview, a Scan button, and optional auto-scan.
  *
- * Uses react-native-vision-camera. Scanning is manual: the user frames a card
- * and taps Scan, which grabs a single camera frame and runs the identify
- * pipeline on it.
+ * Uses react-native-vision-camera. Either way, a scan is one grabbed camera
+ * frame run through the identify pipeline. The Scan button grabs on demand.
+ * Auto-scan grabs when the picture has been held still and is a new scene
+ * (autoScan.ts decides, from a tiny thumbnail kept on the camera thread), so
+ * holding a card steady scans it and moving to the next card scans that too.
  *
  * How we get the pixels is the whole story of this file. On this build every
  * still-photo decode path hangs: nitro-image and expo-image-manipulator (async
@@ -22,9 +24,17 @@ import * as Haptics from 'expo-haptics';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, useFrameOutput, usePreviewOutput } from 'react-native-vision-camera';
+import type { Frame } from 'react-native-vision-camera';
 import { runOnJS } from 'react-native-worklets';
 import { GAMES, GameId } from '../data/types';
 import { crumb, readCrumbs } from '../debug/breadcrumbs';
+import {
+  AutoScanState,
+  createAutoScanState,
+  sampleThumbnail,
+  shouldSample,
+  stepAutoScan,
+} from '../scan/autoScan';
 import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
@@ -53,6 +63,55 @@ const STATUS_TEXT: Record<string, string> = {
 };
 
 const IDLE_STATUS = 'Point at a card and tap Scan';
+const AUTO_IDLE_STATUS = 'Hold a card steady to scan it';
+
+/**
+ * Copy a frame's pixels into a compact RGBA buffer, in the right channel order.
+ * Runs on the camera thread. `meta` describes the frame, for the scan log.
+ */
+function copyFrameToRgba(frame: Frame): { out: Uint8Array; width: number; height: number; meta: string } {
+  'worklet';
+  const plane = frame.getPlanes()[0];
+  if (plane == null) throw new Error('frame has no pixel plane');
+  const width = plane.width;
+  const height = plane.height;
+  const bytesPerRow = plane.bytesPerRow;
+  const src = new Uint8Array(plane.getPixelBuffer());
+  // 'rgb' is 3 bytes/pixel, but some pipelines negotiate a 4-byte layout; derive
+  // it from the row stride and copy into compact RGBA.
+  const channels = Math.max(3, Math.round(bytesPerRow / width));
+  // The channel order is not always RGB: the camera often hands over BGRA
+  // ('rgb-bgra-8-bit'). Reading it as RGB swaps red and blue, and the embedder
+  // scores a red/blue-swapped card ~0.74 against ~0.91.
+  const isBgra = frame.pixelFormat === 'rgb-bgra-8-bit';
+  const redAt = isBgra ? 2 : 0;
+  const blueAt = isBgra ? 0 : 2;
+  const out = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    const row = y * bytesPerRow;
+    for (let x = 0; x < width; x += 1) {
+      const s = row + x * channels;
+      const d = (y * width + x) * 4;
+      out[d] = src[s + redAt];
+      out[d + 1] = src[s + 1];
+      out[d + 2] = src[s + blueAt];
+      out[d + 3] = 255;
+    }
+  }
+  const meta = `format=${frame.pixelFormat} orientation=${frame.orientation} mirrored=${frame.isMirrored} ${width}x${height} stride=${bytesPerRow} channels=${channels}`;
+  return { out, width, height, meta };
+}
+
+/** A tiny brightness thumbnail of a frame, for spotting when the picture is still. */
+function thumbnailOfFrame(frame: Frame): number[] {
+  'worklet';
+  const plane = frame.getPlanes()[0];
+  if (plane == null) throw new Error('frame has no pixel plane');
+  const bytesPerRow = plane.bytesPerRow;
+  const channels = Math.max(3, Math.round(bytesPerRow / plane.width));
+  // Green is the second byte of a pixel in RGB, RGBA and BGRA alike.
+  return sampleThumbnail(new Uint8Array(plane.getPixelBuffer()), plane.width, plane.height, bytesPerRow, channels, 1);
+}
 
 interface Props {
   service: ScanService;
@@ -63,9 +122,22 @@ interface Props {
   syncing?: boolean;
   /** Hide the shutter while something else is on top (e.g. the result sheet). */
   paused?: boolean;
+  /** Scan by itself when a card is held steady, as well as on the Scan button. */
+  autoScan: boolean;
+  onAutoScanChange: (on: boolean) => void;
 }
 
-export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady, syncing, paused }: Props) {
+export function ScanScreen({
+  service,
+  gameId,
+  onGameChange,
+  onResult,
+  indexReady,
+  syncing,
+  paused,
+  autoScan,
+  onAutoScanChange,
+}: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
   // The live preview only renders when a preview output is connected; the frame
@@ -93,6 +165,13 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   // against a stray frame being processed and against double-taps.
   const awaitingCapture = useRef(false);
   const watchdog = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Read by callbacks that outlive a render (camera frames arrive on their own
+  // schedule): whether auto-scan is on, and whether a scan is being processed.
+  const autoRef = useRef(autoScan);
+  const busyRef = useRef(false);
+  useEffect(() => {
+    autoRef.current = autoScan;
+  }, [autoScan]);
 
   useEffect(() => {
     mounted.current = true;
@@ -143,6 +222,15 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
 
   const toggleLog = () => setShowLog((open) => !open);
 
+  // Keep the idle prompt in step with the Auto setting (only while nothing else
+  // is being said: a scan in progress or an outcome on screen is left alone).
+  useEffect(() => {
+    setStatus((current) => {
+      if (current === IDLE_STATUS || current === AUTO_IDLE_STATUS) return autoScan ? AUTO_IDLE_STATUS : IDLE_STATUS;
+      return current;
+    });
+  }, [autoScan]);
+
   useEffect(() => {
     let cancelled = false;
     service
@@ -150,7 +238,7 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
       .then(() => {
         if (!cancelled) {
           setModelsReady(true);
-          setStatus(IDLE_STATUS);
+          setStatus(autoRef.current ? AUTO_IDLE_STATUS : IDLE_STATUS);
         }
       })
       .catch((error: Error) => {
@@ -166,21 +254,19 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   // The Camera streams whenever we have permission and no result sheet is up.
   const cameraActive = hasPermission && !paused;
 
-  // Runs on the JS thread with one grabbed frame's pixels. Guarded so only the
-  // frame captured for the current tap is processed.
-  const onCapturedFrame = useCallback(
-    (data: Uint8Array, width: number, height: number) => {
-      if (!awaitingCapture.current || !mounted.current) return;
-      awaitingCapture.current = false;
-      // Swap back to the discard worklet so no further frames are copied.
-      setGrabbing(false);
-      if (watchdog.current) {
-        clearTimeout(watchdog.current);
-        watchdog.current = null;
-      }
-      crumb(`js: frame received ${width}x${height}, ${data.length} bytes`);
-      setStatus(`Got frame ${width}×${height}…`);
-      const frame: RgbaImage = { data, width, height };
+  const idleStatus = useCallback(() => (autoRef.current ? AUTO_IDLE_STATUS : IDLE_STATUS), []);
+
+  /**
+   * Identify one grabbed frame and show the outcome. `origin` decides how a miss
+   * is worded: after a tap it is guidance, but auto-scan tries whenever a picture
+   * settles, so "no card in view" is just the normal state, not a complaint.
+   */
+  const processFrame = useCallback(
+    (frame: RgbaImage, origin: 'manual' | 'auto') => {
+      busyRef.current = true;
+      setScanning(true);
+      crumb(`js: ${origin} frame received ${frame.width}x${frame.height}, ${frame.data.length} bytes`);
+      setStatus(origin === 'auto' ? 'Card steady — scanning…' : `Got frame ${frame.width}×${frame.height}…`);
       void service
         .scanImageOnce(frame, (stage) => {
           if (mounted.current) setStatus(stage);
@@ -195,9 +281,11 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
                 : Haptics.NotificationFeedbackType.Warning,
             );
             onResult(result);
-            setStatus(IDLE_STATUS);
+            setStatus(idleStatus());
           } else if (result) {
-            setStatus('No match — try again, filling the frame');
+            setStatus(origin === 'auto' ? 'No match — try another card, or tap Scan' : 'No match — try again, filling the frame');
+          } else if (origin === 'auto' && next === 'no-card') {
+            setStatus(AUTO_IDLE_STATUS);
           } else {
             setStatus(STATUS_TEXT[next] ?? next);
           }
@@ -207,10 +295,38 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
           if (mounted.current) setStatus(`Scan error: ${error.message}`);
         })
         .finally(() => {
+          busyRef.current = false;
           if (mounted.current) setScanning(false);
         });
     },
-    [onResult, service],
+    [idleStatus, onResult, service],
+  );
+
+  // A frame grabbed for a tap on Scan. Guarded so only the frame asked for is used.
+  const onCapturedFrame = useCallback(
+    (data: Uint8Array, width: number, height: number) => {
+      if (!awaitingCapture.current || !mounted.current) return;
+      awaitingCapture.current = false;
+      // Swap back to the discard worklet so no further frames are copied.
+      setGrabbing(false);
+      if (watchdog.current) {
+        clearTimeout(watchdog.current);
+        watchdog.current = null;
+      }
+      processFrame({ data, width, height }, 'manual');
+    },
+    [processFrame],
+  );
+
+  // A frame the camera thread grabbed because the picture had been still for a
+  // moment (see autoScan.ts). It may arrive while a scan is already under way, or
+  // after auto-scan was switched off; either way it is dropped.
+  const onAutoFrame = useCallback(
+    (data: Uint8Array, width: number, height: number) => {
+      if (!mounted.current || !autoRef.current || busyRef.current || awaitingCapture.current) return;
+      processFrame({ data, width, height }, 'auto');
+    },
+    [processFrame],
   );
 
   // The grab worklet threw. Surface the reason on screen and reset the shutter,
@@ -228,74 +344,88 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
     setStatus(`Frame grab failed: ${message}`);
   }, []);
 
+  // The auto-scan watcher threw. Log it and carry on; it will try again.
+  const onAutoError = useCallback((message: string) => {
+    crumb(`js: auto-scan watcher error ${message}`);
+  }, []);
+
+  // Auto-scan watches whenever a scan could start and none is running or asked for.
+  const watching = autoScan && ready && !scanning && !grabbing;
+
   const frameOutput = useFrameOutput({
     pixelFormat: 'rgb',
     targetResolution: FRAME_RESOLUTION,
     // Hand us a display-upright buffer so the card is the right way up for the
     // detector, regardless of sensor orientation.
     enablePhysicalBufferRotation: true,
-    // Idle: throw every frame away for free. This is what keeps the UI
-    // responsive while the preview streams. Tapping Scan flips `grabbing`, which
-    // installs the grab worklet below in its place.
+    // Three modes, chosen by React state (the hook re-sends the worklet to the
+    // camera thread when it changes, so no cross-thread flag is needed):
+    //  - grabbing: copy exactly one frame over to JS (the Scan button);
+    //  - watching: keep a tiny thumbnail of each sampled frame and, once the
+    //    picture has held still and is a new scene, copy one frame over
+    //    (auto-scan — nothing else ever crosses to JS, which is what froze the
+    //    old live scanner);
+    //  - otherwise: throw every frame away for free.
     onFrame: grabbing
       ? (frame) => {
           'worklet';
-          let out: Uint8Array | null = null;
-          let width = 0;
-          let height = 0;
+          let picture: { out: Uint8Array; width: number; height: number; meta: string } | null = null;
           let failure: string | null = null;
           runOnJS(crumb)('worklet: grab start');
           try {
-            const plane = frame.getPlanes()[0];
-            if (plane == null) throw new Error('frame has no pixel plane');
-            width = plane.width;
-            height = plane.height;
-            const bytesPerRow = plane.bytesPerRow;
-            const src = new Uint8Array(plane.getPixelBuffer());
-            // 'rgb' is 3 bytes/pixel, but some pipelines negotiate a 4-byte
-            // layout; derive it from the row stride and copy into compact RGBA.
-            const channels = Math.max(3, Math.round(bytesPerRow / width));
-            // The channel order is not always RGB: the camera often hands over
-            // BGRA ('rgb-bgra-8-bit'). Reading it as RGB swaps red and blue, and
-            // the embedder scores a red/blue-swapped card ~0.74 against ~0.91.
-            const isBgra = frame.pixelFormat === 'rgb-bgra-8-bit';
-            const redAt = isBgra ? 2 : 0;
-            const blueAt = isBgra ? 0 : 2;
-            runOnJS(crumb)(
-              `worklet: format=${frame.pixelFormat} orientation=${frame.orientation} mirrored=${frame.isMirrored} ${width}x${height} stride=${bytesPerRow} channels=${channels}`,
-            );
-            out = new Uint8Array(width * height * 4);
-            for (let y = 0; y < height; y += 1) {
-              const row = y * bytesPerRow;
-              for (let x = 0; x < width; x += 1) {
-                const s = row + x * channels;
-                const d = (y * width + x) * 4;
-                out[d] = src[s + redAt];
-                out[d + 1] = src[s + 1];
-                out[d + 2] = src[s + blueAt];
-                out[d + 3] = 255;
-              }
-            }
+            picture = copyFrameToRgba(frame);
+            runOnJS(crumb)(`worklet: ${picture.meta}`);
           } catch (error) {
             failure = String(error);
           }
           frame.dispose();
-          if (failure != null || out == null) {
+          if (failure != null || picture == null) {
             runOnJS(onGrabError)(failure ?? 'no pixels');
           } else {
             runOnJS(crumb)('worklet: copied, handing to JS');
-            runOnJS(onCapturedFrame)(out, width, height);
+            runOnJS(onCapturedFrame)(picture.out, picture.width, picture.height);
           }
         }
-      : (frame) => {
-          'worklet';
-          frame.dispose();
-        },
+      : watching
+        ? (frame) => {
+            'worklet';
+            // State that must outlive a frame lives on this thread's global, which
+            // persists across frames and across re-installs of this worklet.
+            const scope = globalThis as unknown as { __cardscanAuto?: AutoScanState };
+            if (scope.__cardscanAuto == null) scope.__cardscanAuto = createAutoScanState();
+            const state = scope.__cardscanAuto;
+            const now = Date.now();
+            if (!shouldSample(state, now)) {
+              frame.dispose();
+              return;
+            }
+            // Even a failed sample counts as one, so a fault cannot spin every frame.
+            state.lastSampleAt = now;
+
+            let picture: { out: Uint8Array; width: number; height: number; meta: string } | null = null;
+            let failure: string | null = null;
+            try {
+              const step = stepAutoScan(state, thumbnailOfFrame(frame), now);
+              if (step.trigger) {
+                picture = copyFrameToRgba(frame);
+                runOnJS(crumb)(`worklet: auto trigger still=${step.still.toFixed(1)} changed=${step.changed.toFixed(1)} ${picture.meta}`);
+              }
+            } catch (error) {
+              failure = String(error);
+            }
+            frame.dispose();
+            if (failure != null) runOnJS(onAutoError)(failure);
+            else if (picture != null) runOnJS(onAutoFrame)(picture.out, picture.width, picture.height);
+          }
+        : (frame) => {
+            'worklet';
+            frame.dispose();
+          },
   });
 
   // The manual shutter: install the grab worklet so the next frame is captured.
   const requestScan = () => {
-    if (!ready || awaitingCapture.current) return;
+    if (!ready || awaitingCapture.current || busyRef.current) return;
     crumb('tap: scan requested');
     awaitingCapture.current = true;
     setScanning(true);
@@ -391,6 +521,18 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
         </Pressable>
 
         <Pressable
+          accessibilityRole="switch"
+          accessibilityState={{ checked: autoScan }}
+          accessibilityLabel="Auto-scan"
+          onPress={() => onAutoScanChange(!autoScan)}
+          style={[styles.autoPill, autoScan && styles.autoPillOn]}
+        >
+          <Text style={[styles.autoPillText, autoScan && styles.autoPillTextOn]}>
+            {autoScan ? 'Auto-scan on — hold a card steady' : 'Auto-scan off'}
+          </Text>
+        </Pressable>
+
+        <Pressable
           accessibilityRole="button"
           accessibilityLabel="Scan card"
           disabled={!ready || scanning}
@@ -478,6 +620,18 @@ const styles = StyleSheet.create({
   statusText: { color: theme.text, fontSize: 15, textAlign: 'center' },
   warning: { color: theme.check, fontSize: 12, textAlign: 'center' },
   logHint: { color: theme.textMuted, fontSize: 10, textAlign: 'center' },
+  autoPill: {
+    alignSelf: 'center',
+    paddingHorizontal: theme.spacing(1.5),
+    paddingVertical: theme.spacing(0.75),
+    borderRadius: 999,
+    backgroundColor: 'rgba(11,14,20,0.75)',
+    borderWidth: 1,
+    borderColor: theme.border,
+  },
+  autoPillOn: { borderColor: theme.accent },
+  autoPillText: { color: theme.textMuted, fontSize: 12 },
+  autoPillTextOn: { color: theme.text },
   logBox: {
     alignSelf: 'stretch',
     gap: 1,

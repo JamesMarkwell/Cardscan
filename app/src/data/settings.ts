@@ -22,6 +22,8 @@ export interface Settings {
   /** Keep corrections locally so the model can be tuned later. */
   shareCorrections: boolean;
   autoAddHighConfidence: boolean;
+  /** Scan by itself when a card is held steady, as well as on the Scan button. */
+  autoScan: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -30,6 +32,7 @@ export const DEFAULT_SETTINGS: Settings = {
   currency: 'GBP',
   shareCorrections: false,
   autoAddHighConfidence: true,
+  autoScan: true,
 };
 
 function settingsFile(): File {

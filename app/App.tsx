@@ -6,7 +6,7 @@ import { openDatabase } from './src/data/db';
 import { crumb } from './src/debug/breadcrumbs';
 import { ErrorBoundary } from './src/ui/ErrorBoundary';
 import { loadIndexPack } from './src/data/indexPack';
-import { Settings, loadSettings } from './src/data/settings';
+import { Settings, loadSettings, saveSettings } from './src/data/settings';
 import { fetchManifest, localVersion, syncGame } from './src/data/sync';
 import { ScanResult, ScanService } from './src/scan/scanService';
 import { readSerial } from './src/scan/serialOcr';
@@ -117,6 +117,12 @@ export default function App() {
               paused={result !== null}
               onGameChange={(gameId) => setSettings((current) => ({ ...current, gameId }))}
               onResult={setResult}
+              autoScan={settings.autoScan}
+              onAutoScanChange={(autoScan) => {
+                const next = { ...settings, autoScan };
+                setSettings(next);
+                saveSettings(next);
+              }}
             />
           ) : null}
           {tab === 'collection' ? <CollectionScreen reloadKey={collectionKey} /> : null}
