@@ -14,7 +14,9 @@ export interface NativeOnnx {
   run(
     id: string,
     inputName: string,
-    data: Float32Array,
+    // A plain array, not a Float32Array: Expo's native converter for a Kotlin
+    // FloatArray parameter only accepts a JS array and rejects a typed array.
+    data: number[],
     dims: number[],
     outputNames: string[],
   ): Promise<Record<string, NativeOnnxOutput>>;

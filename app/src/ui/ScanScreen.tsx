@@ -77,7 +77,9 @@ export function ScanScreen({ service, gameId, onGameChange, onResult, indexReady
   // cross-thread flag to get wrong.
   const [grabbing, setGrabbing] = useState(false);
   // Tap the status bar to show the step log (survives a crash — see breadcrumbs).
-  const [showLog, setShowLog] = useState(false);
+  // Open by default for now, so after a crash and restart the previous run's last
+  // steps are on screen straight away.
+  const [showLog, setShowLog] = useState(true);
   const [logLines, setLogLines] = useState<string[]>([]);
   // Seconds since the current scan began, so a slow step can be told apart from
   // a frozen app (the counter keeps ticking only while the JS thread is free).

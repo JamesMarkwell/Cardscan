@@ -76,7 +76,9 @@ export class InferenceSession {
     const [name, tensor] = entries[0];
 
     const raw = await withTimeout(
-      nativeModule().run(this.id, name, tensor.data, tensor.dims, this.outputNames),
+      // The native side takes a plain JS array for its FloatArray parameter and
+      // refuses a Float32Array, so convert (a few hundred thousand elements).
+      nativeModule().run(this.id, name, Array.from(tensor.data), tensor.dims, this.outputNames),
       RUN_TIMEOUT_MS,
       'model run',
     );
