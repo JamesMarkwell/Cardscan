@@ -122,6 +122,16 @@ describe('searchPrintings', () => {
     ]);
   });
 
+  it('falls back to TCGplayer prices when there is no Cardmarket price', async () => {
+    await searchPrintings({ query: 'pika' });
+    const sql = String(db.getAllAsync.mock.calls[0][0]);
+    expect(sql).toContain("pc.source = 'cardmarket'");
+    expect(sql).toContain("pt.source = 'tcgplayer'");
+    // Cardmarket's price wins when present, otherwise TCGplayer's, each with its own currency.
+    expect(sql).toMatch(/THEN COALESCE\(pc\.market, pc\.trend, pc\.low\)\s+ELSE COALESCE\(pt\.market, pt\.low\) END AS market/);
+    expect(sql).toMatch(/THEN pc\.currency ELSE pt\.currency END AS price_currency/);
+  });
+
   it('maps rows to printings with their picture and price', async () => {
     db.getAllAsync.mockResolvedValueOnce([
       {

@@ -1,5 +1,5 @@
 /** Find a card by name, set or number and add it to the collection by hand. */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FlatList, Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { formatMoney } from '../collection/organise';
 import { PrintingResult, addToCollection, defaultPortfolio, searchPrintings } from '../data/db';
@@ -7,6 +7,7 @@ import { Condition, GAMES, GameId, Variant } from '../data/types';
 import { VARIANTS } from './CardDetailModal';
 import { CardImage } from './CardImage';
 import { Chips } from './Chips';
+import { useCurrency, withDisplayCurrency } from './CurrencyContext';
 import { theme } from './theme';
 
 const PAGE = 40;
@@ -25,7 +26,9 @@ export function AddCardModal({
 }) {
   const [query, setQuery] = useState('');
   const [gameId, setGameId] = useState<GameId | null>(initialGameId);
-  const [results, setResults] = useState<PrintingResult[]>([]);
+  const [found, setResults] = useState<PrintingResult[]>([]);
+  const currency = useCurrency();
+  const results = useMemo(() => found.map((item) => withDisplayCurrency(item, currency)), [found, currency]);
   const [searching, setSearching] = useState(false);
   const [exhausted, setExhausted] = useState(false);
   const [picked, setPicked] = useState<PrintingResult | null>(null);
@@ -52,10 +55,10 @@ export function AddCardModal({
     setSearching(true);
     const timer = setTimeout(() => {
       searchPrintings({ query, gameId, limit: PAGE })
-        .then((found) => {
+        .then((next) => {
           if (id !== searchId.current) return;
-          setResults(found);
-          setExhausted(found.length < PAGE);
+          setResults(next);
+          setExhausted(next.length < PAGE);
         })
         .catch(() => id === searchId.current && setResults([]))
         .finally(() => id === searchId.current && setSearching(false));
@@ -68,10 +71,10 @@ export function AddCardModal({
     const id = searchId.current;
     setSearching(true);
     searchPrintings({ query, gameId, limit: PAGE, offset: results.length })
-      .then((found) => {
+      .then((more) => {
         if (id !== searchId.current) return;
-        setResults((current) => [...current, ...found]);
-        setExhausted(found.length < PAGE);
+        setResults((current) => [...current, ...more]);
+        setExhausted(more.length < PAGE);
       })
       .finally(() => setSearching(false));
   };

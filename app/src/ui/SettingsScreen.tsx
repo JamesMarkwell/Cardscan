@@ -101,8 +101,8 @@ export function SettingsScreen({ settings, onChange, onSynced }: Props) {
         ))}
       </View>
       <Text style={styles.note}>
-        Prices come from Cardmarket and TCGplayer and are labelled with their source and date. A market
-        price is an observed average, not a guaranteed sale price.
+        Prices are TCGplayer market prices (US dollars), converted to the currency above at the latest
+        exchange rate. A market price is an observed average, not a guaranteed sale price.
       </Text>
 
       <Text style={styles.heading}>Scanning</Text>

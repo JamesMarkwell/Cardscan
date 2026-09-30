@@ -6,9 +6,12 @@
  */
 import React, { useEffect, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { formatMoney } from '../collection/organise';
 import { addToCollection, defaultPortfolio, pricesFor, recordCorrection } from '../data/db';
 import { Condition, Price, Printing, Variant } from '../data/types';
+import { convertAmount } from '../data/currency';
 import { ScanResult } from '../scan/scanService';
+import { useCurrency } from './CurrencyContext';
 import { theme, tierColour, tierLabel } from './theme';
 
 const VARIANTS: Variant[] = ['normal', 'foil', 'reverse', 'first_edition'];
@@ -26,11 +29,10 @@ interface Props {
   onAdded: () => void;
 }
 
-function formatPrice(price: Price): string {
+function formatPrice(price: Price, { currency, rates }: ReturnType<typeof useCurrency>): string {
   const value = price.market ?? price.trend ?? price.low;
   if (value === null || value === undefined) return '—';
-  const symbol = price.currency === 'GBP' ? '£' : price.currency === 'EUR' ? '€' : '$';
-  return `${symbol}${value.toFixed(2)}`;
+  return formatMoney(convertAmount(value, price.currency, currency, rates), currency);
 }
 
 export function ResultSheet({ result, onClose, onAdded }: Props) {
@@ -38,6 +40,7 @@ export function ResultSheet({ result, onClose, onAdded }: Props) {
   const [variant, setVariant] = useState<Variant>('normal');
   const [condition, setCondition] = useState<Condition>('NM');
   const [prices, setPrices] = useState<Price[]>([]);
+  const display = useCurrency();
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -113,7 +116,7 @@ export function ResultSheet({ result, onClose, onAdded }: Props) {
             <View style={styles.priceRow}>
               {prices.map((price) => (
                 <View key={price.source} style={styles.priceCard}>
-                  <Text style={styles.priceValue}>{formatPrice(price)}</Text>
+                  <Text style={styles.priceValue}>{formatPrice(price, display)}</Text>
                   <Text style={styles.priceSource}>
                     {price.source === 'cardmarket' ? 'Cardmarket' : 'TCGplayer'} · {price.asOf.slice(0, 10)}
                   </Text>

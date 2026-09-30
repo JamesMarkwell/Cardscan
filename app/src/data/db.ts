@@ -187,6 +187,22 @@ function toPrinting(row: PrintingRow): Printing {
   };
 }
 
+/**
+ * The price to show for a printing: Cardmarket's when we have it, otherwise
+ * TCGplayer's (the source we currently ingest, in USD). Each falls back through
+ * market, trend and low so a card with a thin price still shows something.
+ * Yields `market` and `price_currency`; the caller converts to the display currency.
+ */
+const PRICE_COLUMNS = `
+  CASE WHEN COALESCE(pc.market, pc.trend, pc.low) IS NOT NULL
+       THEN COALESCE(pc.market, pc.trend, pc.low)
+       ELSE COALESCE(pt.market, pt.low) END AS market,
+  CASE WHEN COALESCE(pc.market, pc.trend, pc.low) IS NOT NULL
+       THEN pc.currency ELSE pt.currency END AS price_currency`;
+const PRICE_JOINS = `
+  LEFT JOIN prices_latest pc ON pc.printing_id = p.id AND pc.source = 'cardmarket'
+  LEFT JOIN prices_latest pt ON pt.printing_id = p.id AND pt.source = 'tcgplayer'`;
+
 const PRINTING_SELECT = `
   SELECT p.id, p.card_id, p.game_id, c.name AS name, p.set_id,
          s.code AS set_code, s.name AS set_name, p.number, p.set_total, p.rarity,
@@ -361,7 +377,7 @@ export async function collectionRows(portfolioId: number): Promise<CollectionRow
   }>(
     `SELECT e.id AS entry_id, e.portfolio_id, e.variant AS entry_variant, e.condition, e.quantity,
             e.cost_basis, e.added_at,
-            pr.market AS market, pr.currency AS price_currency,
+            ${PRICE_COLUMNS},
             p.id, p.card_id, p.game_id, c.name AS name, p.set_id, s.code AS set_code,
             s.name AS set_name, p.number, p.set_total, p.rarity, p.variant, p.language,
             p.image_key, p.image_url, p.tcgplayer_product_id, p.cardmarket_product_id
@@ -369,7 +385,7 @@ export async function collectionRows(portfolioId: number): Promise<CollectionRow
      JOIN printings p ON p.id = e.printing_id
      JOIN cards c ON c.id = p.card_id
      JOIN sets s ON s.id = p.set_id
-     LEFT JOIN prices_latest pr ON pr.printing_id = p.id AND pr.source = 'cardmarket'
+     ${PRICE_JOINS}
      WHERE e.portfolio_id = ?
      ORDER BY e.added_at DESC`,
     [portfolioId],
@@ -501,11 +517,11 @@ export async function searchPrintings(params: {
     `SELECT p.id, p.card_id, p.game_id, c.name AS name, p.set_id, s.code AS set_code, s.name AS set_name,
             p.number, p.set_total, p.rarity, p.variant, p.language, p.image_key, p.image_url,
             p.tcgplayer_product_id, p.cardmarket_product_id,
-            pr.market AS market, pr.currency AS price_currency
+            ${PRICE_COLUMNS}
      FROM printings p
      JOIN cards c ON c.id = p.card_id
      JOIN sets s ON s.id = p.set_id
-     LEFT JOIN prices_latest pr ON pr.printing_id = p.id AND pr.source = 'cardmarket'
+     ${PRICE_JOINS}
      WHERE ${where.join(' AND ')}
      ORDER BY (c.name LIKE ?) DESC, c.name ASC, s.release_date DESC, p.number ASC
      LIMIT ? OFFSET ?`,

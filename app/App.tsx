@@ -2,6 +2,7 @@
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StoredRates, fetchRates, loadRates, ratesAreStale } from './src/data/currency';
 import { openDatabase } from './src/data/db';
 import { crumb } from './src/debug/breadcrumbs';
 import { ErrorBoundary } from './src/ui/ErrorBoundary';
@@ -11,6 +12,7 @@ import { fetchManifest, localVersion, syncGame } from './src/data/sync';
 import { ScanResult, ScanService } from './src/scan/scanService';
 import { readSerial } from './src/scan/serialOcr';
 import { CollectionScreen } from './src/ui/CollectionScreen';
+import { CurrencyProvider } from './src/ui/CurrencyContext';
 import { ResultSheet } from './src/ui/ResultSheet';
 import { ScanScreen } from './src/ui/ScanScreen';
 import { SettingsScreen } from './src/ui/SettingsScreen';
@@ -31,6 +33,9 @@ export default function App() {
   const [collectionKey, setCollectionKey] = useState(0);
   const [indexReady, setIndexReady] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  // Exchange rates for showing prices in the chosen currency; refreshed in the
+  // background when the saved ones are old, and never blocking anything.
+  const [rates, setRates] = useState<StoredRates>(() => loadRates());
 
   const service = useMemo(
     () =>
@@ -46,6 +51,15 @@ export default function App() {
 
   useEffect(() => {
     void openDatabase();
+  }, []);
+
+  useEffect(() => {
+    if (!ratesAreStale(rates)) return;
+    void fetchRates().then((fresh) => {
+      if (fresh) setRates(fresh);
+    });
+    // Only on launch: a failed fetch must not retry in a loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Auto-sync from the baked-in (or saved) catalog URL, so the catalogue loads
@@ -104,6 +118,7 @@ export default function App() {
 
   return (
     <ErrorBoundary>
+      <CurrencyProvider currency={settings.currency} rates={rates.rates}>
       <View style={styles.container}>
         <StatusBar style="light" />
 
@@ -149,6 +164,7 @@ export default function App() {
           onAdded={() => setCollectionKey((key) => key + 1)}
         />
       </View>
+      </CurrencyProvider>
     </ErrorBoundary>
   );
 }

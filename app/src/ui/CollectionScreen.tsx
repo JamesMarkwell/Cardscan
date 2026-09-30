@@ -38,6 +38,7 @@ import { AddCardModal } from './AddCardModal';
 import { CardDetailModal } from './CardDetailModal';
 import { CardImage } from './CardImage';
 import { Chips } from './Chips';
+import { useCurrency, withDisplayCurrency } from './CurrencyContext';
 import { theme } from './theme';
 
 type ViewMode = 'list' | 'grid';
@@ -60,7 +61,10 @@ function detailLine(row: CollectionRow): string {
 }
 
 export function CollectionScreen({ reloadKey }: { reloadKey: number }) {
-  const [rows, setRows] = useState<CollectionRow[]>([]);
+  const [loaded, setRows] = useState<CollectionRow[]>([]);
+  // Prices are stored in their source's currency; show them in the one chosen in Settings.
+  const currency = useCurrency();
+  const rows = useMemo(() => loaded.map((row) => withDisplayCurrency(row, currency)), [loaded, currency]);
   const [refreshing, setRefreshing] = useState(false);
   const [filters, setFilters] = useState<CollectionFilters>(NO_FILTERS);
   const [sort, setSort] = useState<SortKey>('name');
