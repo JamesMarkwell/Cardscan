@@ -29,8 +29,14 @@ export interface Detection {
 }
 
 export interface ScanOptions {
-  /** Below this the frame is treated as "no card". */
+  /** Below this the frame is treated as "no card" (used with the presence head). */
   minCornerConfidence?: number;
+  /**
+   * Below this the frame is treated as "no card" (used with the sharpness head).
+   * Measured on the bundled model: about 0.01 with no card in view and 0.05-0.07
+   * with a card in frame, so this sits between the two.
+   */
+  minCardScore?: number;
   /** Fraction of the frame the card must fill. */
   minQuadArea?: number;
   /** Embed the 180-degree rotation too and keep the stronger match. */
@@ -40,6 +46,7 @@ export interface ScanOptions {
 
 const DEFAULTS: Required<ScanOptions> = {
   minCornerConfidence: 0.35,
+  minCardScore: 0.03,
   minQuadArea: 0.1,
   tryRotated: true,
   topK: 10,
@@ -131,12 +138,18 @@ export class ScanPipeline {
       points.push([clamp01(cornersRaw[i]), clamp01(cornersRaw[i + 1])]);
     }
 
+    // Which head says "a card is here" matters. The bundled model's presence head
+    // reads a constant 1.0 for every input (flat grey, black and noise included),
+    // so it cannot tell a card from no card. The sharpness head does: about 0.01
+    // with nothing in view, 0.05-0.07 with a card in frame. Prefer it, against its
+    // own floor, and fall back to presence only if a model has no such head.
     const confidence = sharpness ?? sigmoid(presenceLogit);
+    const floor = sharpness !== null ? this.options.minCardScore : this.options.minCornerConfidence;
     return {
       corners: orderCorners(points, frame.width, frame.height),
       sharpness,
       confidence,
-      cardPresent: confidence >= this.options.minCornerConfidence,
+      cardPresent: confidence >= floor,
     };
   }
 
@@ -236,15 +249,17 @@ export function combineFrames(
 ): { candidates: Candidate[]; confidence: ConfidenceResult } {
   const usable = frames.filter((frame) => frame.candidates.length > 0);
   const candidates = voteAcrossFrames(usable.map((frame) => frame.candidates));
-  const sharpness = usable.length > 0 ? usable[usable.length - 1].detection.sharpness : null;
-
   return {
     candidates,
     confidence: assessConfidence({
       candidates,
       frameCount: usable.length,
       ocrAgrees,
-      sharpness,
+      // The detector's sharpness head is not used to grade the match: on the
+      // bundled model it spans only about 0.01-0.07, so the "blurry below 0.35"
+      // rule would downgrade every scan. It is used, on its own scale, to decide
+      // whether a card is present at all (see ScanPipeline.detect).
+      sharpness: null,
     }),
   };
 }
