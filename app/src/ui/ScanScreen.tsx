@@ -198,6 +198,9 @@ export function ScanScreen({
   const lastAdd = useRef<{ portfolioId: number; printingId: string; variant: Printing['variant']; condition: Condition } | null>(null);
   // The scene the last auto-scan looked at. The camera thread tracks this too, but
   // its state is lost if the camera restarts, so the JS side refuses a repeat as well.
+  // A card that settled while another was being read, waiting for its turn.
+  const queuedFrame = useRef<RgbaImage | null>(null);
+  const processRef = useRef<(frame: RgbaImage, origin: 'manual' | 'auto') => void>(() => {});
   const lastAutoScene = useRef<{ scene: number[]; at: number } | null>(null);
   useEffect(() => {
     autoRef.current = autoScan;
@@ -367,10 +370,18 @@ export function ScanScreen({
         .finally(() => {
           busyRef.current = false;
           if (mounted.current) setScanning(false);
+          const next = queuedFrame.current;
+          queuedFrame.current = null;
+          if (next && mounted.current && autoRef.current && !awaitingCapture.current) {
+            crumb('js: scanning the card that arrived during the last scan');
+            processRef.current(next, 'auto');
+          }
         });
     },
     [addAutomatically, idleStatus, onResult, service],
   );
+
+  processRef.current = processFrame;
 
   // A frame grabbed for a tap on Scan. Guarded so only the frame asked for is used.
   const onCapturedFrame = useCallback(
@@ -393,7 +404,7 @@ export function ScanScreen({
   // after auto-scan was switched off; either way it is dropped.
   const onAutoFrame = useCallback(
     (data: Uint8Array, width: number, height: number, scene: number[]) => {
-      if (!mounted.current || !autoRef.current || busyRef.current || awaitingCapture.current) return;
+      if (!mounted.current || !autoRef.current || awaitingCapture.current) return;
       const previous = lastAutoScene.current;
       const now = Date.now();
       if (previous != null && now - previous.at < REPEAT_WINDOW_MS && sceneDistance(scene, previous.scene) < CHANGED_DIFF) {
@@ -401,7 +412,15 @@ export function ScanScreen({
         return;
       }
       lastAutoScene.current = { scene, at: now };
-      processFrame({ data, width, height }, 'auto');
+      const frame = { data, width, height };
+      if (busyRef.current) {
+        // The next card arrived while the last is still being read: keep its picture
+        // (the newest one wins) and scan it the moment the current scan ends.
+        queuedFrame.current = frame;
+        crumb('js: auto frame queued behind the scan in progress');
+        return;
+      }
+      processFrame(frame, 'auto');
     },
     [processFrame],
   );
@@ -427,7 +446,8 @@ export function ScanScreen({
   }, []);
 
   // Auto-scan watches whenever a scan could start and none is running or asked for.
-  const watching = autoScan && ready && !scanning && !grabbing;
+  // It keeps watching while a scan runs, so the next card is already captured when this one ends.
+  const watching = autoScan && ready && !grabbing;
 
   const frameOutput = useFrameOutput({
     pixelFormat: 'rgb',

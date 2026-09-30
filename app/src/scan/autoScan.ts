@@ -23,11 +23,11 @@ export const STILL_DIFF = 4;
 /** Structural change (overall brightness removed) from the last scanned scene above which it counts as a new scene. */
 export const CHANGED_DIFF = 10;
 /** Consecutive samples that must differ from the scanned scene before a new card counts. */
-export const AWAY_SAMPLES = 3;
-/** Consecutive still samples needed before a picture is taken (~0.6s at the sample rate). */
-export const STABLE_SAMPLES = 5;
+export const AWAY_SAMPLES = 2;
+/** Consecutive still samples needed before a picture is taken (~0.3s at the sample rate). */
+export const STABLE_SAMPLES = 3;
 /** Minimum time between samples, so a fast camera costs no more than a slow one. */
-export const SAMPLE_INTERVAL_MS = 120;
+export const SAMPLE_INTERVAL_MS = 100;
 
 export interface AutoScanState {
   /** The previous sample, for spotting motion. */

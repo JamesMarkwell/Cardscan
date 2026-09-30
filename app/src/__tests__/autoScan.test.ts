@@ -1,4 +1,5 @@
 import {
+  AWAY_SAMPLES,
   CHANGED_DIFF,
   SAMPLE_INTERVAL_MS,
   STABLE_SAMPLES,
@@ -145,9 +146,23 @@ describe('stepAutoScan', () => {
   it('a brief change (a passing hand) does not re-arm the scan', () => {
     const state = createAutoScanState();
     expect(feed(state, stripes(0), 30)).toBe(1);
-    stepAutoScan(state, stripes(1), 10_000);
-    stepAutoScan(state, stripes(1), 10_120);
+    // One odd sample fewer than it takes to count as a new card.
+    for (let i = 0; i < AWAY_SAMPLES - 1; i += 1) stepAutoScan(state, stripes(1), 10_000 + i * SAMPLE_INTERVAL_MS);
     expect(feed(state, stripes(0), 30, 11_000)).toBe(0);
+  });
+
+  it('a new card settles and is scanned within about half a second', () => {
+    const state = createAutoScanState();
+    expect(feed(state, stripes(0), 30)).toBe(1);
+    // The next card: it must differ for AWAY_SAMPLES samples and hold still for STABLE_SAMPLES.
+    let steps = 0;
+    let triggered = false;
+    while (!triggered && steps < 20) {
+      triggered = stepAutoScan(state, stripes(1), 10_000 + steps * SAMPLE_INTERVAL_MS).trigger;
+      steps += 1;
+    }
+    expect(triggered).toBe(true);
+    expect(steps * SAMPLE_INTERVAL_MS).toBeLessThanOrEqual(700);
   });
 
   it('survives a pause: coming back to the same scene does not scan it twice', () => {
