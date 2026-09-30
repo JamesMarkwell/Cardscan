@@ -17,6 +17,7 @@ import { GameId } from '../data/types';
 import { Point } from './geometry';
 import { RgbaImage, dewarpRegion } from './image';
 import { OCR_REGIONS } from './ocr';
+import type { SerialRead } from './scanService';
 import { parseSerial } from './serial';
 
 // Real card dimensions (mm). Only the ratio matters: it sets the strip's shape so
@@ -25,8 +26,10 @@ const CARD_WIDTH_MM = 63;
 const CARD_HEIGHT_MM = 88;
 
 // The strip is sampled wide enough for a small serial to be legible; a serial is
-// a couple of millimetres tall on a card that is ~600px across in the frame.
-const STRIP_WIDTH = 640;
+// a couple of millimetres tall on a card that is ~600px across in the frame. It
+// spans the card's full width so the printed name is read with the serial — the
+// name is what corroborates a serial that was misread by a digit.
+const STRIP_WIDTH = 1100;
 
 // Which cyclic shift of the corners to try, in order. 0 is the card upright in
 // the frame, which is the common case.
@@ -52,7 +55,8 @@ export function stripSize(game: GameId, width = STRIP_WIDTH): { width: number; h
 }
 
 /**
- * Read the serial off a card in the frame, or null if none could be read.
+ * Read the serial off a card in the frame, along with the rest of the text in the
+ * strip (the card's name, chiefly), or null if no serial could be read.
  * `corners` are the detector's, ordered TL, TR, BR, BL in normalised coordinates.
  */
 export async function readSerial(
@@ -60,7 +64,7 @@ export async function readSerial(
   frame: RgbaImage,
   corners: Point[],
   trace?: (message: string) => void,
-): Promise<string | null> {
+): Promise<SerialRead | null> {
   const region = OCR_REGIONS[game];
   const { width, height } = stripSize(game);
 
@@ -71,10 +75,10 @@ export async function readSerial(
     const started = Date.now();
     const strip = dewarpRegion(frame, turned, region, width, height);
     const lines = await requestNative(toArgbPixels(strip), strip.width, strip.height);
-    trace?.(`ocr: orientation ${shift} (${Date.now() - started}ms) ${JSON.stringify(lines).slice(0, 140)}`);
+    trace?.(`ocr: orientation ${shift} (${Date.now() - started}ms) ${JSON.stringify(lines).slice(0, 220)}`);
 
     const serial = parseSerial(game, lines);
-    if (serial) return serial;
+    if (serial) return { serial, lines };
   }
   return null;
 }

@@ -4,7 +4,7 @@
  * Kept free of React so it can be driven by the accuracy harness in /testset as
  * well as by the camera screen.
  */
-import { printingsBySerial, printingsForIndexRow } from '../data/db';
+import { printingsForIndexRow, printingsMatchingSerials } from '../data/db';
 import { GameId, Printing } from '../data/types';
 import { loadFrame } from './capture';
 import { ConfidenceResult, assessConfidence } from './confidence';
@@ -13,14 +13,30 @@ import { RgbaImage } from './image';
 import { OCR_REGIONS, OcrProvider, ParsedCorner, PrintingScore, ocrAgreement, parseCornerText, rankPrintings } from './ocr';
 import { CaptureGate, FrameResult, ScanPipeline, combineFrames } from './pipeline';
 import { Candidate } from './search';
-import { SERIAL_GAMES, SerialMatch, rankPrintingsBySerial, serialConfidence, serialSet } from './serial';
+import {
+  SERIAL_GAMES,
+  SerialChoice,
+  SerialMatch,
+  chooseSerial,
+  nearSerialPatterns,
+  rankPrintingsBySerial,
+  serialConfidence,
+  serialSet,
+} from './serial';
+
+/** A serial read off a card, with the rest of the text read from the same strip. */
+export interface SerialRead {
+  serial: string;
+  /** Every line of text found alongside it — chiefly the card's printed name. */
+  lines: string[];
+}
 
 /**
  * Reads the printed serial off a card in the frame, or returns null. `corners`
  * are the detector's (TL, TR, BR, BL, normalised). Injected so this service stays
  * free of native code; the app supplies the on-device recogniser.
  */
-export type SerialReader = (game: GameId, frame: RgbaImage, corners: Point[]) => Promise<string | null>;
+export type SerialReader = (game: GameId, frame: RgbaImage, corners: Point[]) => Promise<SerialRead | null>;
 
 export interface ScanCandidate {
   artId: string;
@@ -147,66 +163,87 @@ export class ScanService {
     // one: it names the card, where the picture match alone is weak on real
     // photos. Failing to read one is normal (glare, blur, an odd angle) and just
     // leaves the picture match to answer alone.
-    let serial: string | null = null;
+    let read: SerialRead | null = null;
     const reader = this.options.serialReader;
     if (reader && SERIAL_GAMES.has(this.options.gameId)) {
       onStage?.('Reading card number…');
       await new Promise<void>((resolve) => setTimeout(resolve, 50));
       try {
-        serial = await reader(this.options.gameId, frame, processed.detection.corners);
+        read = await reader(this.options.gameId, frame, processed.detection.corners);
       } catch (error) {
         this.pipeline.trace?.(`serial: reader failed — ${(error as Error).message}`);
       }
-      this.pipeline.trace?.(`serial: ${serial ?? 'not read'}`);
+      this.pipeline.trace?.(`serial: ${read?.serial ?? 'not read'}`);
     }
 
     onStage?.('Matching…');
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     this.reset();
     this.frames.push(processed);
-    const result = await this.finish(null, serial);
+    const result = await this.finish(null, read);
     this.reset();
     return { result, status: 'done' };
   }
 
   /**
-   * The printings that carry a serial, best first — or null if the catalogue has
-   * none. The picture match chooses among them; the serial's own set breaks ties.
+   * Settle a serial read off the card against the catalogue.
+   *
+   * The serial is misread a digit at a time often enough (OP17 read as OP12, a
+   * real serial of another card) that it is not trusted alone: printings carrying
+   * it or a serial one digit away are gathered, and the card's printed name and
+   * the picture decide among them. The chosen serial's printings then come back
+   * ranked, with how firmly the rest of the evidence backed it. Null when the
+   * catalogue has nothing near the serial.
    */
-  private async matchBySerial(serial: string): Promise<SerialMatch[] | null> {
-    const printings = await printingsBySerial(this.options.gameId, serial);
-    this.pipeline.trace?.(`serial: ${serial} -> ${printings.length} printing(s) in the catalogue`);
-    if (printings.length === 0) return null;
+  private async matchBySerial(
+    read: SerialRead,
+  ): Promise<{ serial: string; ranked: SerialMatch[]; choice: SerialChoice } | null> {
+    const near = await printingsMatchingSerials(this.options.gameId, nearSerialPatterns(read.serial));
+    this.pipeline.trace?.(`serial: ${read.serial} -> ${near.length} printing(s) at or near it`);
+    if (near.length === 0) return null;
 
     const embedding = this.frames[this.frames.length - 1]?.embedding ?? null;
-    const ranked = rankPrintingsBySerial(printings, serial, embedding, this.pipeline.indexPack);
+    const pack = this.pipeline.indexPack;
+    const choice = chooseSerial(near, read.serial, read.lines, embedding, pack);
+    if (!choice) return null;
+
+    const ranked = rankPrintingsBySerial(
+      near.filter((printing) => printing.number === choice.serial),
+      choice.serial,
+      embedding,
+      pack,
+    );
+    this.pipeline.trace?.(
+      `serial: chose ${choice.serial}${choice.exact ? '' : ` (read as ${read.serial})`} name=${choice.nameScore.toFixed(2)} picture=${choice.imageScore === null ? 'none' : choice.imageScore.toFixed(3)}`,
+    );
     for (const match of ranked.slice(0, 4)) {
       this.pipeline.trace?.(
         `serial: ${match.printing.id} score=${match.score === null ? 'no index row' : match.score.toFixed(3)}${match.home ? ' (home set)' : ''}`,
       );
     }
-    return ranked;
+    return { serial: choice.serial, ranked, choice };
   }
 
   /** Resolve the frames gathered so far into a result. */
-  async finish(photoUri: string | null, serial: string | null = null): Promise<ScanResult> {
+  async finish(photoUri: string | null, read: SerialRead | null = null): Promise<ScanResult> {
     const started = Date.now();
     const voted = combineFrames(this.frames);
 
     const candidates = await this.expandCandidates(voted.candidates);
 
     // A readable serial that the catalogue knows decides the card.
-    const bySerial = serial ? await this.matchBySerial(serial) : null;
-    if (serial && bySerial) {
-      const serialPrintingIds = new Set(bySerial.map((match) => match.printing.id));
+    const bySerial = read ? await this.matchBySerial(read) : null;
+    if (bySerial) {
+      const { serial, ranked, choice } = bySerial;
+      const serialPrintingIds = new Set(ranked.map((match) => match.printing.id));
       const others = candidates.filter((candidate) => !candidate.printings.some((p) => serialPrintingIds.has(p.id)));
       return {
-        printing: bySerial[0].printing,
+        printing: ranked[0].printing,
         candidates: [
-          { artId: `serial:${serial}`, score: bySerial[0].score ?? 0, printings: bySerial.map((match) => match.printing) },
+          { artId: `serial:${serial}`, score: ranked[0].score ?? 0, printings: ranked.map((match) => match.printing) },
           ...others,
         ],
-        confidence: serialConfidence(serial, bySerial),
+        confidence: serialConfidence(serial, ranked, choice),
         parsedCorner: { setCode: serialSet(serial), number: serial, setTotal: null, language: null },
         printingScores: [],
         embedding: this.frames[this.frames.length - 1]?.embedding ?? null,

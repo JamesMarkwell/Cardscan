@@ -1,6 +1,16 @@
 import { Printing } from '../data/types';
 import { IndexPack } from '../scan/search';
-import { parseOnePieceSerial, parseSerial, rankPrintingsBySerial, serialConfidence, serialSet } from '../scan/serial';
+import {
+  chooseSerial,
+  editDistance,
+  nameSimilarity,
+  nearSerialPatterns,
+  parseOnePieceSerial,
+  parseSerial,
+  rankPrintingsBySerial,
+  serialConfidence,
+  serialSet,
+} from '../scan/serial';
 
 describe('parseOnePieceSerial', () => {
   it('reads a clean serial, including with other text on the line', () => {
@@ -146,5 +156,78 @@ describe('serialConfidence', () => {
       { printing: other, score: 0.6, home: false },
     ]);
     expect(result.tier).toBe('check');
+  });
+});
+
+describe('editDistance', () => {
+  it('counts single-character differences', () => {
+    expect(editDistance('OP17-070', 'OP17-070')).toBe(0);
+    expect(editDistance('OP17-070', 'OP12-070')).toBe(1);
+    expect(editDistance('OP17-070', 'ST17-070')).toBe(2);
+    expect(editDistance('', 'abc')).toBe(3);
+  });
+});
+
+describe('nearSerialPatterns', () => {
+  it('gives the serial itself and a wildcard for each digit', () => {
+    expect(nearSerialPatterns('OP12-070')).toEqual([
+      'OP12-070',
+      'OP_2-070',
+      'OP1_-070',
+      'OP12-_70',
+      'OP12-0_0',
+      'OP12-07_',
+    ]);
+  });
+
+  it('leaves the letters and hyphen alone', () => {
+    expect(nearSerialPatterns('P-001')).toEqual(['P-001', 'P-_01', 'P-0_1', 'P-00_']);
+  });
+});
+
+describe('nameSimilarity', () => {
+  it('is 1 when the whole name is in the text, ignoring case and punctuation', () => {
+    expect(nameSimilarity(['SCRATCHMEN  apoo', 'On-Air Pirates'], 'Scratchmen Apoo')).toBe(1);
+  });
+
+  it('gives partial credit for a partly read name', () => {
+    expect(nameSimilarity(['men Apoo'], 'Scratchmen Apoo')).toBe(0.5);
+  });
+
+  it('forgives a slip or two in a longer word', () => {
+    expect(nameSimilarity(['Scratchrnen Apoo'], 'Scratchmen Apoo')).toBe(1); // "m" read as "rn"
+    expect(nameSimilarity(['Apco'], 'Apoo')).toBe(0); // too short to forgive
+  });
+
+  it('is 0 for a different card, and ignores short words', () => {
+    expect(nameSimilarity(['Scratchmen Apoo', 'Animal Kingdom Pirates'], 'Monkey D Luffy')).toBe(0);
+    expect(nameSimilarity(['and the one'], 'Ulti and Page One')).toBe(0); // only "ulti" and "page" count
+    expect(nameSimilarity(['anything'], 'to be')).toBe(0);
+  });
+});
+
+describe('chooseSerial', () => {
+  const other = { ...printing('o', 'OP12'), name: 'Some Other Character', number: 'OP12-070' };
+  const apoo = { ...printing('a', 'OP17'), name: 'Scratchmen Apoo', number: 'OP17-070' };
+
+  it('takes the serial as read when nothing argues against it', () => {
+    const choice = chooseSerial([other, apoo], 'OP12-070', ['OP12-070'], null, null);
+    expect(choice).toMatchObject({ serial: 'OP12-070', exact: true, nameScore: 0 });
+  });
+
+  it('lets a matching name overrule a serial off by a digit', () => {
+    const choice = chooseSerial([other, apoo], 'OP12-070', ['Scratchmen Apoo', 'OP12070'], null, null);
+    expect(choice).toMatchObject({ serial: 'OP17-070', read: 'OP12-070', exact: false, nameScore: 1 });
+  });
+
+  it('lets the picture overrule when no name was read', () => {
+    const pack2: IndexPack = { ids: ['o', 'a'], matrix: Float32Array.from([0.1, 0.1, 0.95, 0.3]), dim: 2, version: 't' };
+    const choice = chooseSerial([other, apoo], 'OP12-070', [], Float32Array.from([1, 0]), pack2);
+    expect(choice?.serial).toBe('OP17-070');
+    expect(choice?.imageScore).toBeCloseTo(0.95, 5);
+  });
+
+  it('returns null with nothing to choose from', () => {
+    expect(chooseSerial([], 'OP12-070', [], null, null)).toBeNull();
   });
 });

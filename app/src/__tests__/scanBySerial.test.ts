@@ -12,7 +12,7 @@ import { ScanService, SerialReader } from '../scan/scanService';
 import { IndexPack } from '../scan/search';
 
 jest.mock('../data/db', () => ({
-  printingsBySerial: jest.fn(),
+  printingsMatchingSerials: jest.fn(),
   printingsForIndexRow: jest.fn(),
 }));
 // The pipeline pulls in native modules at import time; none are needed here.
@@ -21,7 +21,7 @@ jest.mock('../scan/models', () => ({ CORNELIUS: {}, MILO: {}, createSession: jes
 jest.mock('../scan/capture', () => ({ loadFrame: jest.fn() }));
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const db = require('../data/db') as { printingsBySerial: jest.Mock; printingsForIndexRow: jest.Mock };
+const db = require('../data/db') as { printingsMatchingSerials: jest.Mock; printingsForIndexRow: jest.Mock };
 
 function printing(id: string, setCode: string, variant: Printing['variant'] = 'normal', name = 'Scratchmen Apoo'): Printing {
   return {
@@ -71,21 +71,21 @@ const index: IndexPack = {
 };
 
 beforeEach(() => {
-  db.printingsBySerial.mockReset();
+  db.printingsMatchingSerials.mockReset();
   db.printingsForIndexRow.mockReset();
   // The picture match alone finds an unrelated card, as it did on device.
   db.printingsForIndexRow.mockResolvedValue({ artId: 'other-art', printings: [printing('other', 'OPPR', 'normal', 'Wrong Card')] });
 });
 
 it('lets a readable serial pick the card, and the picture choose the variant', async () => {
-  db.printingsBySerial.mockResolvedValue([standard, altArt]);
-  const reader: SerialReader = jest.fn().mockResolvedValue('OP17-070');
+  db.printingsMatchingSerials.mockResolvedValue([standard, altArt]);
+  const reader: SerialReader = jest.fn().mockResolvedValue({ serial: 'OP17-070', lines: ['Scratchmen Apoo', 'OP17-070 C'] });
   const service = new ScanService({ gameId: 'onepiece', serialReader: reader }, fakePipeline(index));
 
   const { result } = await service.scanImageOnce(frame);
 
   expect(reader).toHaveBeenCalledWith('onepiece', frame, expect.any(Array));
-  expect(db.printingsBySerial).toHaveBeenCalledWith('onepiece', 'OP17-070');
+  expect(db.printingsMatchingSerials).toHaveBeenCalledWith('onepiece', expect.arrayContaining(['OP17-070', 'OP_7-070']));
   expect(result?.printing?.id).toBe(altArt.id); // its picture matches best
   expect(result?.candidates[0].printings.map((p) => p.id)).toEqual([altArt.id, standard.id]);
   expect(result?.parsedCorner?.number).toBe('OP17-070');
@@ -96,8 +96,8 @@ it('lets a readable serial pick the card, and the picture choose the variant', a
 });
 
 it('is one confident answer when only one printing carries the serial', async () => {
-  db.printingsBySerial.mockResolvedValue([standard]);
-  const service = new ScanService({ gameId: 'onepiece', serialReader: async () => 'OP17-070' }, fakePipeline(index));
+  db.printingsMatchingSerials.mockResolvedValue([standard]);
+  const service = new ScanService({ gameId: 'onepiece', serialReader: async () => ({ serial: 'OP17-070', lines: ['Scratchmen Apoo'] }) }, fakePipeline(index));
 
   const { result } = await service.scanImageOnce(frame);
 
@@ -110,13 +110,13 @@ it('falls back to the picture match when no serial can be read', async () => {
 
   const { result } = await service.scanImageOnce(frame);
 
-  expect(db.printingsBySerial).not.toHaveBeenCalled();
+  expect(db.printingsMatchingSerials).not.toHaveBeenCalled();
   expect(result?.printing?.name).toBe('Wrong Card');
 });
 
 it('falls back to the picture match when the serial is not in the catalogue', async () => {
-  db.printingsBySerial.mockResolvedValue([]);
-  const service = new ScanService({ gameId: 'onepiece', serialReader: async () => 'OP99-001' }, fakePipeline(index));
+  db.printingsMatchingSerials.mockResolvedValue([]);
+  const service = new ScanService({ gameId: 'onepiece', serialReader: async () => ({ serial: 'OP99-001', lines: [] }) }, fakePipeline(index));
 
   const { result } = await service.scanImageOnce(frame);
 
@@ -130,8 +130,81 @@ it('survives the reader failing, and does not read serials for games that have n
   );
   expect((await failing.scanImageOnce(frame)).result?.printing?.name).toBe('Wrong Card');
 
-  const reader = jest.fn().mockResolvedValue('OP17-070');
+  const reader = jest.fn().mockResolvedValue({ serial: 'OP17-070', lines: [] });
   const pokemon = new ScanService({ gameId: 'pokemon', serialReader: reader }, fakePipeline(index));
   await pokemon.scanImageOnce(frame);
   expect(reader).not.toHaveBeenCalled();
+});
+
+describe('a serial misread by a digit', () => {
+  // The bug seen on a real phone: "OP17-070" was read as "OP12-070", which is a
+  // genuine serial of a different card, so it matched with full confidence.
+  const wrongCard = printing('onepiece:OP12:OP12070:normal:en', 'OP12', 'normal', 'Some Other Character');
+  wrongCard.number = 'OP12-070';
+  standard.number = 'OP17-070';
+  altArt.number = 'OP17-070';
+
+  it('lets the printed name overrule the misread digit', async () => {
+    db.printingsMatchingSerials.mockResolvedValue([wrongCard, standard, altArt]);
+    const service = new ScanService(
+      {
+        gameId: 'onepiece',
+        serialReader: async () => ({
+          serial: 'OP12-070',
+          lines: ['Scratchmen Apoo', 'On-Air Pirates/Animal Kingdom Pirtes OP12070 ER'],
+        }),
+      },
+      fakePipeline(index),
+    );
+
+    const { result } = await service.scanImageOnce(frame);
+
+    expect(result?.printing?.name).toBe('Scratchmen Apoo');
+    expect(result?.printing?.number).toBe('OP17-070');
+    expect(result?.parsedCorner?.number).toBe('OP17-070');
+    expect(result?.confidence.tier).toBe('high');
+    expect(result?.confidence.reasons.join(' ')).toContain('read as OP12-070');
+  });
+
+  it('only asks for a check when the name is just partly read', async () => {
+    db.printingsMatchingSerials.mockResolvedValue([wrongCard, standard, altArt]);
+    const service = new ScanService(
+      { gameId: 'onepiece', serialReader: async () => ({ serial: 'OP12-070', lines: ['men Apoo', 'n'] }) },
+      fakePipeline(index),
+    );
+
+    const { result } = await service.scanImageOnce(frame);
+
+    expect(result?.printing?.number).toBe('OP17-070');
+    expect(result?.confidence.tier).toBe('check');
+  });
+
+  it('keeps the serial as read when nothing contradicts it, but does not call it certain', async () => {
+    db.printingsMatchingSerials.mockResolvedValue([wrongCard]);
+    const service = new ScanService(
+      { gameId: 'onepiece', serialReader: async () => ({ serial: 'OP12-070', lines: ['OP12-070'] }) },
+      fakePipeline(null),
+    );
+
+    const { result } = await service.scanImageOnce(frame);
+
+    expect(result?.printing?.number).toBe('OP12-070');
+    // One printing has it, but neither the name nor the picture confirms the read.
+    expect(result?.confidence.tier).toBe('check');
+    expect(result?.confidence.reasons.join(' ')).toContain('not yet confirmed');
+  });
+
+  it('is high when the name confirms the serial exactly as read', async () => {
+    db.printingsMatchingSerials.mockResolvedValue([standard]);
+    const service = new ScanService(
+      { gameId: 'onepiece', serialReader: async () => ({ serial: 'OP17-070', lines: ['Scratchmen Apoo', 'OP17-070'] }) },
+      fakePipeline(null),
+    );
+
+    const { result } = await service.scanImageOnce(frame);
+
+    expect(result?.printing?.id).toBe(standard.id);
+    expect(result?.confidence.tier).toBe('high');
+    expect(result?.confidence.reasons.join(' ')).toContain('card name agrees');
+  });
 });

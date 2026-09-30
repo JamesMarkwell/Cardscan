@@ -29,9 +29,12 @@ import { RgbaImage } from '../scan/image';
 import { ScanResult, ScanService } from '../scan/scanService';
 import { theme } from './theme';
 
-// Working frame size. The detector wants 384px and the dewarped crop 448px, so
-// this oversamples both while keeping the single per-capture pixel copy cheap.
-const FRAME_RESOLUTION = { width: 960, height: 540 };
+// Frame size. Detection (384px) and the picture match (448px) would be fine on
+// far less, but the printed serial is only a couple of millimetres tall: at
+// ~1000px it is about 9px high and digits get misread (a "17" came out as "12"),
+// so ask for a full-HD frame. The extra cost is one longer pixel copy per scan;
+// everything downstream resamples to a fixed size.
+const FRAME_RESOLUTION = { width: 1920, height: 1080 };
 // Frames stream continuously but the worklet discards them for free until a
 // capture is requested, so a low rate is plenty and keeps power/heat down.
 const CAPTURE_FPS = 10;

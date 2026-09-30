@@ -233,6 +233,22 @@ export async function printingsBySerial(gameId: GameId, serial: string): Promise
   return rows.map(toPrinting);
 }
 
+/**
+ * Printings whose serial matches any of the given SQL LIKE patterns — the serial
+ * that was read and the ones a digit away from it (see nearSerialPatterns), so a
+ * misread digit can still be resolved by the rest of the evidence.
+ */
+export async function printingsMatchingSerials(gameId: GameId, patterns: string[]): Promise<Printing[]> {
+  if (patterns.length === 0) return [];
+  const db = await openDatabase();
+  const clauses = patterns.map(() => 'p.number LIKE ?').join(' OR ');
+  const rows = await db.getAllAsync<PrintingRow>(
+    `${PRINTING_SELECT} WHERE p.game_id = ? AND (${clauses}) ORDER BY s.release_date DESC, p.id ASC LIMIT 400`,
+    [gameId, ...patterns],
+  );
+  return rows.map(toPrinting);
+}
+
 export async function printingById(id: string): Promise<Printing | null> {
   const db = await openDatabase();
   const row = await db.getFirstAsync<PrintingRow>(`${PRINTING_SELECT} WHERE p.id = ?`, [id]);
