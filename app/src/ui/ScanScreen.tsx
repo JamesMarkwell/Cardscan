@@ -30,7 +30,9 @@ import { GAMES, GameId } from '../data/types';
 import { crumb, readCrumbs } from '../debug/breadcrumbs';
 import {
   AutoScanState,
+  CHANGED_DIFF,
   createAutoScanState,
+  sceneDistance,
   sampleThumbnail,
   shouldSample,
   stepAutoScan,
@@ -51,6 +53,8 @@ const CAPTURE_FPS = 10;
 // If the camera hasn't delivered a frame this long after a tap, give up rather
 // than spin forever (e.g. the stream stalled).
 const CAPTURE_TIMEOUT_MS = 6000;
+// An auto frame of the same scene as the last auto scan, this soon after it, is a repeat.
+const REPEAT_WINDOW_MS = 30_000;
 
 // What each pipeline rejection reason means for the person holding the phone.
 const STATUS_TEXT: Record<string, string> = {
@@ -169,6 +173,9 @@ export function ScanScreen({
   // schedule): whether auto-scan is on, and whether a scan is being processed.
   const autoRef = useRef(autoScan);
   const busyRef = useRef(false);
+  // The scene the last auto-scan looked at. The camera thread tracks this too, but
+  // its state is lost if the camera restarts, so the JS side refuses a repeat as well.
+  const lastAutoScene = useRef<{ scene: number[]; at: number } | null>(null);
   useEffect(() => {
     autoRef.current = autoScan;
   }, [autoScan]);
@@ -322,8 +329,15 @@ export function ScanScreen({
   // moment (see autoScan.ts). It may arrive while a scan is already under way, or
   // after auto-scan was switched off; either way it is dropped.
   const onAutoFrame = useCallback(
-    (data: Uint8Array, width: number, height: number) => {
+    (data: Uint8Array, width: number, height: number, scene: number[]) => {
       if (!mounted.current || !autoRef.current || busyRef.current || awaitingCapture.current) return;
+      const previous = lastAutoScene.current;
+      const now = Date.now();
+      if (previous != null && now - previous.at < REPEAT_WINDOW_MS && sceneDistance(scene, previous.scene) < CHANGED_DIFF) {
+        crumb('js: auto frame dropped, same scene as the last auto scan');
+        return;
+      }
+      lastAutoScene.current = { scene, at: now };
       processFrame({ data, width, height }, 'auto');
     },
     [processFrame],
@@ -404,8 +418,10 @@ export function ScanScreen({
 
             let picture: { out: Uint8Array; width: number; height: number; meta: string } | null = null;
             let failure: string | null = null;
+            let scene: number[] = [];
             try {
               const step = stepAutoScan(state, thumbnailOfFrame(frame), now);
+              scene = step.thumb;
               if (step.trigger) {
                 picture = copyFrameToRgba(frame);
                 runOnJS(crumb)(`worklet: auto trigger still=${step.still.toFixed(1)} changed=${step.changed.toFixed(1)} ${picture.meta}`);
@@ -415,7 +431,7 @@ export function ScanScreen({
             }
             frame.dispose();
             if (failure != null) runOnJS(onAutoError)(failure);
-            else if (picture != null) runOnJS(onAutoFrame)(picture.out, picture.width, picture.height);
+            else if (picture != null) runOnJS(onAutoFrame)(picture.out, picture.width, picture.height, scene);
           }
         : (frame) => {
             'worklet';

@@ -121,13 +121,33 @@ describe('stepAutoScan', () => {
     expect(feed(state, flat(100), 200)).toBe(1);
   });
 
+  /** A scene with structure: `phase` picks which cells are bright, `level` the overall exposure. */
+  const stripes = (phase: number, level = 100) =>
+    new Array<number>(THUMB_COLS * THUMB_ROWS).fill(0).map((_, i) => level + (((i + phase) % 2) * 2 - 1) * 40);
+
   it('scans again only after the scene changes and settles', () => {
     const state = createAutoScanState();
-    expect(feed(state, flat(100), 30)).toBe(1);
+    expect(feed(state, stripes(0), 30)).toBe(1);
     // A slight change is not a new card…
-    expect(feed(state, flat(100 + CHANGED_DIFF - 4), 30, 10_000)).toBe(0);
+    const nudged = stripes(0).map((v, i) => v + (i % 7 === 0 ? CHANGED_DIFF - 4 : 0));
+    expect(feed(state, nudged, 30, 10_000)).toBe(0);
     // …a clearly different scene is.
-    expect(feed(state, flat(100 + CHANGED_DIFF + 20), 30, 20_000)).toBe(1);
+    expect(feed(state, stripes(1), 30, 20_000)).toBe(1);
+  });
+
+  it('ignores exposure drifting: the same picture brighter or darker is not a new card', () => {
+    const state = createAutoScanState();
+    expect(feed(state, stripes(0, 100), 30)).toBe(1);
+    expect(feed(state, stripes(0, 160), 30, 10_000)).toBe(0);
+    expect(feed(state, stripes(0, 60), 30, 20_000)).toBe(0);
+  });
+
+  it('a brief change (a passing hand) does not re-arm the scan', () => {
+    const state = createAutoScanState();
+    expect(feed(state, stripes(0), 30)).toBe(1);
+    stepAutoScan(state, stripes(1), 10_000);
+    stepAutoScan(state, stripes(1), 10_120);
+    expect(feed(state, stripes(0), 30, 11_000)).toBe(0);
   });
 
   it('survives a pause: coming back to the same scene does not scan it twice', () => {
