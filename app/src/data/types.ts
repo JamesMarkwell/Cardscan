@@ -36,6 +36,8 @@ export interface Printing {
   variant: Variant;
   language: string;
   imageKey: string | null;
+  /** Where the card's picture can be fetched, when the catalogue knows. */
+  imageUrl?: string | null;
   tcgplayerProductId: number | null;
   cardmarketProductId: number | null;
 }

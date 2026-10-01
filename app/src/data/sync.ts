@@ -115,12 +115,12 @@ async function upsertPrintings(db: SQLite.SQLiteDatabase, rows: Array<Record<str
   for (const row of rows) {
     await db.runAsync(
       `INSERT INTO printings (id, card_id, game_id, set_id, number, set_total, rarity, variant,
-                              language, image_key, tcgplayer_product_id, cardmarket_product_id, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              language, image_key, image_url, tcgplayer_product_id, cardmarket_product_id, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
          set_id = excluded.set_id, number = excluded.number, set_total = excluded.set_total,
          rarity = excluded.rarity, variant = excluded.variant, language = excluded.language,
-         image_key = excluded.image_key, tcgplayer_product_id = excluded.tcgplayer_product_id,
+         image_key = excluded.image_key, image_url = excluded.image_url, tcgplayer_product_id = excluded.tcgplayer_product_id,
          cardmarket_product_id = excluded.cardmarket_product_id, updated_at = excluded.updated_at`,
       [
         row.id,
@@ -133,6 +133,7 @@ async function upsertPrintings(db: SQLite.SQLiteDatabase, rows: Array<Record<str
         row.variant ?? 'normal',
         row.language ?? 'en',
         row.imageKey ?? null,
+        row.imageUrl ?? null,
         row.tcgplayerProductId ?? null,
         row.cardmarketProductId ?? null,
         row.updatedAt ?? new Date().toISOString(),

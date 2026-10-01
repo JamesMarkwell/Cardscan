@@ -71,6 +71,7 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       variant TEXT NOT NULL DEFAULT 'normal',
       language TEXT NOT NULL DEFAULT 'en',
       image_key TEXT,
+      image_url TEXT,
       tcgplayer_product_id INTEGER,
       cardmarket_product_id INTEGER,
       updated_at TEXT
@@ -126,6 +127,16 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
     );
   `);
 
+  // Databases made before card pictures were kept have no image_url column. Add it,
+  // and forget the synced catalogue versions so the next sync fetches every card
+  // again with its picture. (Fails harmlessly when the column already exists.)
+  try {
+    await db.execAsync('ALTER TABLE printings ADD COLUMN image_url TEXT');
+    await db.execAsync('DELETE FROM catalog_version');
+  } catch {
+    // Already present.
+  }
+
   const existing = await db.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM portfolios');
   if (!existing || existing.count === 0) {
     await db.runAsync('INSERT INTO portfolios (name, currency, created_at) VALUES (?, ?, ?)', [
@@ -150,6 +161,7 @@ interface PrintingRow {
   variant: string;
   language: string;
   image_key: string | null;
+  image_url?: string | null;
   tcgplayer_product_id: number | null;
   cardmarket_product_id: number | null;
 }
@@ -169,15 +181,32 @@ function toPrinting(row: PrintingRow): Printing {
     variant: row.variant as Variant,
     language: row.language,
     imageKey: row.image_key,
+    imageUrl: row.image_url ?? null,
     tcgplayerProductId: row.tcgplayer_product_id,
     cardmarketProductId: row.cardmarket_product_id,
   };
 }
 
+/**
+ * The price to show for a printing: Cardmarket's when we have it, otherwise
+ * TCGplayer's (the source we currently ingest, in USD). Each falls back through
+ * market, trend and low so a card with a thin price still shows something.
+ * Yields `market` and `price_currency`; the caller converts to the display currency.
+ */
+const PRICE_COLUMNS = `
+  CASE WHEN COALESCE(pc.market, pc.trend, pc.low) IS NOT NULL
+       THEN COALESCE(pc.market, pc.trend, pc.low)
+       ELSE COALESCE(pt.market, pt.low) END AS market,
+  CASE WHEN COALESCE(pc.market, pc.trend, pc.low) IS NOT NULL
+       THEN pc.currency ELSE pt.currency END AS price_currency`;
+const PRICE_JOINS = `
+  LEFT JOIN prices_latest pc ON pc.printing_id = p.id AND pc.source = 'cardmarket'
+  LEFT JOIN prices_latest pt ON pt.printing_id = p.id AND pt.source = 'tcgplayer'`;
+
 const PRINTING_SELECT = `
   SELECT p.id, p.card_id, p.game_id, c.name AS name, p.set_id,
          s.code AS set_code, s.name AS set_name, p.number, p.set_total, p.rarity,
-         p.variant, p.language, p.image_key, p.tcgplayer_product_id, p.cardmarket_product_id
+         p.variant, p.language, p.image_key, p.image_url, p.tcgplayer_product_id, p.cardmarket_product_id
   FROM printings p
   JOIN cards c ON c.id = p.card_id
   JOIN sets s ON s.id = p.set_id
@@ -348,15 +377,15 @@ export async function collectionRows(portfolioId: number): Promise<CollectionRow
   }>(
     `SELECT e.id AS entry_id, e.portfolio_id, e.variant AS entry_variant, e.condition, e.quantity,
             e.cost_basis, e.added_at,
-            pr.market AS market, pr.currency AS price_currency,
+            ${PRICE_COLUMNS},
             p.id, p.card_id, p.game_id, c.name AS name, p.set_id, s.code AS set_code,
             s.name AS set_name, p.number, p.set_total, p.rarity, p.variant, p.language,
-            p.image_key, p.tcgplayer_product_id, p.cardmarket_product_id
+            p.image_key, p.image_url, p.tcgplayer_product_id, p.cardmarket_product_id
      FROM collection e
      JOIN printings p ON p.id = e.printing_id
      JOIN cards c ON c.id = p.card_id
      JOIN sets s ON s.id = p.set_id
-     LEFT JOIN prices_latest pr ON pr.printing_id = p.id AND pr.source = 'cardmarket'
+     ${PRICE_JOINS}
      WHERE e.portfolio_id = ?
      ORDER BY e.added_at DESC`,
     [portfolioId],
@@ -392,4 +421,142 @@ export async function recordCorrection(
       new Date().toISOString(),
     ],
   );
+}
+
+/** Change a collection row's quantity, condition or variant. */
+export async function updateCollectionEntry(
+  id: number,
+  changes: { quantity?: number; condition?: Condition; variant?: Variant },
+): Promise<void> {
+  const db = await openDatabase();
+  await db.withTransactionAsync(async () => {
+    const current = await db.getFirstAsync<{
+      portfolio_id: number;
+      printing_id: string;
+      variant: string;
+      condition: string;
+      quantity: number;
+    }>('SELECT portfolio_id, printing_id, variant, condition, quantity FROM collection WHERE id = ?', [id]);
+    if (!current) return;
+
+    const variant = changes.variant ?? current.variant;
+    const condition = changes.condition ?? current.condition;
+    const quantity = Math.max(1, changes.quantity ?? current.quantity);
+
+    // Changing to a variant/condition already in the collection merges into that row.
+    const other = await db.getFirstAsync<{ id: number }>(
+      `SELECT id FROM collection
+       WHERE portfolio_id = ? AND printing_id = ? AND variant = ? AND condition = ? AND id <> ?`,
+      [current.portfolio_id, current.printing_id, variant, condition, id],
+    );
+    if (other) {
+      await db.runAsync('UPDATE collection SET quantity = quantity + ? WHERE id = ?', [quantity, other.id]);
+      await db.runAsync('DELETE FROM collection WHERE id = ?', [id]);
+      return;
+    }
+    await db.runAsync('UPDATE collection SET variant = ?, condition = ?, quantity = ? WHERE id = ?', [
+      variant,
+      condition,
+      quantity,
+      id,
+    ]);
+  });
+}
+
+export async function removeFromCollection(id: number): Promise<void> {
+  const db = await openDatabase();
+  await db.runAsync('DELETE FROM collection WHERE id = ?', [id]);
+}
+
+/** How many of an exact card (printing, version, condition) are in the collection. */
+export async function ownedQuantity(
+  portfolioId: number,
+  printingId: string,
+  variant: Variant,
+  condition: Condition,
+): Promise<number> {
+  const db = await openDatabase();
+  const row = await db.getFirstAsync<{ quantity: number }>(
+    'SELECT quantity FROM collection WHERE portfolio_id = ? AND printing_id = ? AND variant = ? AND condition = ?',
+    [portfolioId, printingId, variant, condition],
+  );
+  return row?.quantity ?? 0;
+}
+
+/** Take one copy back out (Undo): a stack of several loses one, a single copy is removed. */
+export async function removeOneFromCollection(
+  portfolioId: number,
+  printingId: string,
+  variant: Variant,
+  condition: Condition,
+): Promise<void> {
+  const db = await openDatabase();
+  await db.withTransactionAsync(async () => {
+    const where = 'portfolio_id = ? AND printing_id = ? AND variant = ? AND condition = ?';
+    const args = [portfolioId, printingId, variant, condition];
+    await db.runAsync(`UPDATE collection SET quantity = quantity - 1 WHERE ${where} AND quantity > 1`, args);
+    await db.runAsync(`DELETE FROM collection WHERE ${where} AND quantity <= 1`, args);
+  });
+}
+
+/** Remove several collection rows at once. */
+export async function removeManyFromCollection(ids: number[]): Promise<void> {
+  if (ids.length === 0) return;
+  const db = await openDatabase();
+  await db.withTransactionAsync(async () => {
+    // SQLite caps the number of bound variables, so go in modest batches.
+    for (let start = 0; start < ids.length; start += 500) {
+      const batch = ids.slice(start, start + 500);
+      await db.runAsync(`DELETE FROM collection WHERE id IN (${batch.map(() => '?').join(',')})`, batch);
+    }
+  });
+}
+
+export interface PrintingResult extends Printing {
+  market: number | null;
+  currency: string | null;
+}
+
+/**
+ * Find printings to add by hand. Every word must match somewhere in the card's
+ * name, number, or set (code or name), so "charizard base" or "OP17 070" both work.
+ * Whole-name prefix matches come first.
+ */
+export async function searchPrintings(params: {
+  query: string;
+  gameId?: GameId | null;
+  limit?: number;
+  offset?: number;
+}): Promise<PrintingResult[]> {
+  const terms = params.query.trim().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return [];
+
+  const db = await openDatabase();
+  const where: string[] = [];
+  const args: Array<string | number> = [];
+  if (params.gameId) {
+    where.push('p.game_id = ?');
+    args.push(params.gameId);
+  }
+  for (const term of terms) {
+    where.push('(c.name LIKE ? OR p.number LIKE ? OR s.code LIKE ? OR s.name LIKE ?)');
+    const like = `%${term}%`;
+    args.push(like, like, like, like);
+  }
+
+  const rows = await db.getAllAsync<PrintingRow & { market: number | null; price_currency: string | null }>(
+    `SELECT p.id, p.card_id, p.game_id, c.name AS name, p.set_id, s.code AS set_code, s.name AS set_name,
+            p.number, p.set_total, p.rarity, p.variant, p.language, p.image_key, p.image_url,
+            p.tcgplayer_product_id, p.cardmarket_product_id,
+            ${PRICE_COLUMNS}
+     FROM printings p
+     JOIN cards c ON c.id = p.card_id
+     JOIN sets s ON s.id = p.set_id
+     ${PRICE_JOINS}
+     WHERE ${where.join(' AND ')}
+     ORDER BY (c.name LIKE ?) DESC, c.name ASC, s.release_date DESC, p.number ASC
+     LIMIT ? OFFSET ?`,
+    [...args, `${terms[0]}%`, params.limit ?? 40, params.offset ?? 0],
+  );
+  return rows.map((row) => ({ ...toPrinting(row), market: row.market, currency: row.price_currency }));
 }

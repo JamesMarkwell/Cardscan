@@ -6,9 +6,13 @@
  */
 import React, { useEffect, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { formatMoney } from '../collection/organise';
 import { addToCollection, defaultPortfolio, pricesFor, recordCorrection } from '../data/db';
 import { Condition, Price, Printing, Variant } from '../data/types';
+import { convertAmount } from '../data/currency';
 import { ScanResult } from '../scan/scanService';
+import { CardImage } from './CardImage';
+import { useCurrency } from './CurrencyContext';
 import { theme, tierColour, tierLabel } from './theme';
 
 const VARIANTS: Variant[] = ['normal', 'foil', 'reverse', 'first_edition'];
@@ -26,11 +30,10 @@ interface Props {
   onAdded: () => void;
 }
 
-function formatPrice(price: Price): string {
+function formatPrice(price: Price, { currency, rates }: ReturnType<typeof useCurrency>): string {
   const value = price.market ?? price.trend ?? price.low;
   if (value === null || value === undefined) return '—';
-  const symbol = price.currency === 'GBP' ? '£' : price.currency === 'EUR' ? '€' : '$';
-  return `${symbol}${value.toFixed(2)}`;
+  return formatMoney(convertAmount(value, price.currency, currency, rates), currency);
 }
 
 export function ResultSheet({ result, onClose, onAdded }: Props) {
@@ -38,6 +41,7 @@ export function ResultSheet({ result, onClose, onAdded }: Props) {
   const [variant, setVariant] = useState<Variant>('normal');
   const [condition, setCondition] = useState<Condition>('NM');
   const [prices, setPrices] = useState<Price[]>([]);
+  const display = useCurrency();
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -92,13 +96,19 @@ export function ResultSheet({ result, onClose, onAdded }: Props) {
           </View>
 
           {selected ? (
-            <>
-              <Text style={styles.name}>{selected.name}</Text>
-              <Text style={styles.meta}>
-                {selected.setName} · {selected.setCode} {selected.number}
-                {selected.setTotal ? `/${selected.setTotal}` : ''} · {selected.rarity ?? 'Unknown rarity'}
-              </Text>
-            </>
+            <View style={styles.identity}>
+              <CardImage uri={selected.imageUrl} width={72} label={selected.name} />
+              <View style={styles.identityText}>
+                <Text style={styles.name} numberOfLines={2}>
+                  {selected.name}
+                </Text>
+                <Text style={styles.meta} numberOfLines={2}>
+                  {selected.setName} · {selected.setCode} {selected.number}
+                  {selected.setTotal ? `/${selected.setTotal}` : ''}
+                  {selected.rarity ? ` · ${selected.rarity}` : ''}
+                </Text>
+              </View>
+            </View>
           ) : (
             <Text style={styles.name}>No match found</Text>
           )}
@@ -113,7 +123,7 @@ export function ResultSheet({ result, onClose, onAdded }: Props) {
             <View style={styles.priceRow}>
               {prices.map((price) => (
                 <View key={price.source} style={styles.priceCard}>
-                  <Text style={styles.priceValue}>{formatPrice(price)}</Text>
+                  <Text style={styles.priceValue}>{formatPrice(price, display)}</Text>
                   <Text style={styles.priceSource}>
                     {price.source === 'cardmarket' ? 'Cardmarket' : 'TCGplayer'} · {price.asOf.slice(0, 10)}
                   </Text>
@@ -197,27 +207,31 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     padding: theme.spacing(2.5),
-    gap: theme.spacing(1),
-    maxHeight: '90%',
+    paddingBottom: theme.spacing(4),
+    gap: theme.spacing(1.25),
+    maxHeight: '92%',
   },
   tierPill: { alignSelf: 'flex-start', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 4 },
-  tierText: { color: '#08121C', fontWeight: '700', fontSize: 12 },
-  name: { color: theme.text, fontSize: 22, fontWeight: '700' },
+  tierText: { color: '#14110D', fontWeight: '700', fontSize: 12 },
+  identity: { flexDirection: 'row', alignItems: 'center', gap: theme.spacing(1.75) },
+  identityText: { flex: 1, gap: 2 },
+  name: { color: theme.text, fontSize: 20, fontWeight: '800' },
   meta: { color: theme.textMuted, fontSize: 14 },
   reasons: { color: theme.textMuted, fontSize: 12 },
   sectionLabel: { color: theme.textMuted, fontSize: 12, textTransform: 'uppercase', marginTop: theme.spacing(1) },
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.spacing(1) },
   chip: {
-    paddingHorizontal: theme.spacing(1.5),
-    paddingVertical: theme.spacing(0.75),
-    borderRadius: 999,
+    height: 36,
+    justifyContent: 'center',
+    paddingHorizontal: theme.spacing(1.75),
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: theme.border,
     backgroundColor: theme.surface,
   },
   chipActive: { backgroundColor: theme.accent, borderColor: theme.accent },
-  chipText: { color: theme.textMuted, fontSize: 13 },
-  chipTextActive: { color: '#fff', fontWeight: '600' },
+  chipText: { color: theme.textMuted, fontSize: 13, fontWeight: '600' },
+  chipTextActive: { color: theme.onAccent, fontWeight: '700' },
   priceRow: { flexDirection: 'row', gap: theme.spacing(1) },
   priceCard: { flex: 1, backgroundColor: theme.surface, borderRadius: theme.radius, padding: theme.spacing(1.5) },
   priceValue: { color: theme.text, fontSize: 18, fontWeight: '700' },
@@ -235,10 +249,10 @@ const styles = StyleSheet.create({
   alternativeName: { color: theme.text, fontSize: 14, fontWeight: '600' },
   alternativeMeta: { color: theme.textMuted, fontSize: 12 },
   actions: { flexDirection: 'row', gap: theme.spacing(1), marginTop: theme.spacing(1) },
-  button: { flex: 1, paddingVertical: theme.spacing(1.5), borderRadius: theme.radius, alignItems: 'center' },
-  primary: { backgroundColor: theme.accent },
-  primaryText: { color: '#fff', fontWeight: '700' },
-  secondary: { backgroundColor: theme.surfaceAlt },
+  button: { height: 52, justifyContent: 'center', borderRadius: theme.radius, alignItems: 'center' },
+  primary: { flex: 2, backgroundColor: theme.accent },
+  primaryText: { color: theme.onAccent, fontWeight: '800' },
+  secondary: { flex: 1, backgroundColor: theme.surfaceAlt },
   secondaryText: { color: theme.textMuted, fontWeight: '600' },
   disabled: { opacity: 0.5 },
 });

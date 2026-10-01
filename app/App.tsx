@@ -2,8 +2,10 @@
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StoredRates, fetchRates, loadRates, ratesAreStale } from './src/data/currency';
 import { openDatabase } from './src/data/db';
 import { crumb } from './src/debug/breadcrumbs';
+import { warmUpKerching } from './src/feedback/kerching';
 import { ErrorBoundary } from './src/ui/ErrorBoundary';
 import { loadIndexPack } from './src/data/indexPack';
 import { Settings, loadSettings, saveSettings } from './src/data/settings';
@@ -11,17 +13,22 @@ import { fetchManifest, localVersion, syncGame } from './src/data/sync';
 import { ScanResult, ScanService } from './src/scan/scanService';
 import { readSerial } from './src/scan/serialOcr';
 import { CollectionScreen } from './src/ui/CollectionScreen';
+import { CurrencyProvider } from './src/ui/CurrencyContext';
+import { HomeScreen } from './src/ui/HomeScreen';
+import { Icon, IconName } from './src/ui/Icon';
+import type { SortKey } from './src/collection/organise';
 import { ResultSheet } from './src/ui/ResultSheet';
 import { ScanScreen } from './src/ui/ScanScreen';
 import { SettingsScreen } from './src/ui/SettingsScreen';
 import { theme } from './src/ui/theme';
 
-type Tab = 'scan' | 'collection' | 'settings';
+type Tab = 'home' | 'scan' | 'collection' | 'settings';
 
-const TABS: Array<{ id: Tab; label: string }> = [
-  { id: 'scan', label: 'Scan' },
-  { id: 'collection', label: 'Collection' },
-  { id: 'settings', label: 'Settings' },
+const TABS: Array<{ id: Tab; label: string; icon: IconName }> = [
+  { id: 'home', label: 'Home', icon: 'home' },
+  { id: 'scan', label: 'Scan', icon: 'scan' },
+  { id: 'collection', label: 'Collection', icon: 'collection' },
+  { id: 'settings', label: 'Settings', icon: 'settings' },
 ];
 
 export default function App() {
@@ -29,8 +36,13 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
   const [result, setResult] = useState<ScanResult | null>(null);
   const [collectionKey, setCollectionKey] = useState(0);
+  // "View all" on Home opens the collection sorted by price; a new nonce re-applies it.
+  const [sortRequest, setSortRequest] = useState<{ sort: SortKey; nonce: number } | undefined>();
   const [indexReady, setIndexReady] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  // Exchange rates for showing prices in the chosen currency; refreshed in the
+  // background when the saved ones are old, and never blocking anything.
+  const [rates, setRates] = useState<StoredRates>(() => loadRates());
 
   const service = useMemo(
     () =>
@@ -46,6 +58,16 @@ export default function App() {
 
   useEffect(() => {
     void openDatabase();
+    warmUpKerching();
+  }, []);
+
+  useEffect(() => {
+    if (!ratesAreStale(rates)) return;
+    void fetchRates().then((fresh) => {
+      if (fresh) setRates(fresh);
+    });
+    // Only on launch: a failed fetch must not retry in a loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Auto-sync from the baked-in (or saved) catalog URL, so the catalogue loads
@@ -104,6 +126,7 @@ export default function App() {
 
   return (
     <ErrorBoundary>
+      <CurrencyProvider currency={settings.currency} rates={rates.rates}>
       <View style={styles.container}>
         <StatusBar style="light" />
 
@@ -118,6 +141,9 @@ export default function App() {
               onGameChange={(gameId) => setSettings((current) => ({ ...current, gameId }))}
               onResult={setResult}
               autoScan={settings.autoScan}
+              autoAdd={settings.autoAddHighConfidence}
+              sound={settings.soundEffects}
+              onAdded={() => setCollectionKey((key) => key + 1)}
               onAutoScanChange={(autoScan) => {
                 const next = { ...settings, autoScan };
                 setSettings(next);
@@ -125,7 +151,19 @@ export default function App() {
               }}
             />
           ) : null}
-          {tab === 'collection' ? <CollectionScreen reloadKey={collectionKey} /> : null}
+          {tab === 'home' ? (
+            <HomeScreen
+              reloadKey={collectionKey}
+              onScan={() => setTab('scan')}
+              onViewAll={() => {
+                setSortRequest((current) => ({ sort: 'price', nonce: (current?.nonce ?? 0) + 1 }));
+                setTab('collection');
+              }}
+            />
+          ) : null}
+          {tab === 'collection' ? (
+            <CollectionScreen reloadKey={collectionKey} onScan={() => setTab('scan')} sortRequest={sortRequest} />
+          ) : null}
           {tab === 'settings' ? (
             <SettingsScreen
               settings={settings}
@@ -135,12 +173,26 @@ export default function App() {
           ) : null}
         </View>
 
-        <View style={styles.tabBar}>
-          {TABS.map((entry) => (
-            <Pressable key={entry.id} style={styles.tab} onPress={() => setTab(entry.id)}>
-              <Text style={[styles.tabText, tab === entry.id && styles.tabTextActive]}>{entry.label}</Text>
-            </Pressable>
-          ))}
+        <View style={styles.tabBarWrap}>
+          <View style={styles.tabBar}>
+            {TABS.map((entry) => {
+              const active = tab === entry.id;
+              return (
+                <Pressable
+                  key={entry.id}
+                  style={[styles.tab, active && styles.tabActive]}
+                  onPress={() => setTab(entry.id)}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: active }}
+                >
+                  <Icon name={entry.icon} size={22} color={active ? theme.accent : theme.textMuted} />
+                  <Text style={[styles.tabText, active && styles.tabTextActive]} numberOfLines={1}>
+                    {entry.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
         </View>
 
         <ResultSheet
@@ -149,6 +201,7 @@ export default function App() {
           onAdded={() => setCollectionKey((key) => key + 1)}
         />
       </View>
+      </CurrencyProvider>
     </ErrorBoundary>
   );
 }
@@ -156,15 +209,19 @@ export default function App() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.background },
   screen: { flex: 1 },
+  // The bar floats as a rounded pill above the screen edge, with the active tab highlighted.
+  tabBarWrap: { paddingHorizontal: theme.spacing(2), paddingTop: theme.spacing(1), paddingBottom: theme.spacing(2), backgroundColor: theme.background },
   tabBar: {
     flexDirection: 'row',
     backgroundColor: theme.surface,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: theme.border,
-    paddingBottom: theme.spacing(3),
-    paddingTop: theme.spacing(1.5),
+    borderWidth: 1,
+    borderColor: theme.border,
+    borderRadius: 32,
+    padding: 6,
+    gap: 4,
   },
-  tab: { flex: 1, alignItems: 'center' },
-  tabText: { color: theme.textMuted, fontSize: 13, fontWeight: '600' },
+  tab: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 3, height: 54, borderRadius: 26 },
+  tabActive: { backgroundColor: theme.accentSoft },
+  tabText: { color: theme.textMuted, fontSize: 11, fontWeight: '700' },
   tabTextActive: { color: theme.accent },
 });
