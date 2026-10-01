@@ -1,5 +1,8 @@
 import {
   AWAY_SAMPLES,
+  DUPLICATE_DIFF,
+  REPEAT_WINDOW_MS,
+  isRepeatOfLastScan,
   CHANGED_DIFF,
   SAMPLE_INTERVAL_MS,
   STABLE_SAMPLES,
@@ -178,5 +181,29 @@ describe('stepAutoScan', () => {
     const step = stepAutoScan(state, flat(103), 120);
     expect(step.still).toBe(3);
     expect(step.trigger).toBe(false);
+  });
+});
+
+describe('isRepeatOfLastScan', () => {
+  const stripes = (phase: number, level = 100) =>
+    new Array<number>(THUMB_COLS * THUMB_ROWS).fill(0).map((_, i) => level + (((i + phase) % 2) * 2 - 1) * 40);
+  const last = { scene: stripes(0), at: 1000 };
+
+  it('is a repeat when the picture is practically identical, soon after', () => {
+    expect(isRepeatOfLastScan(last, stripes(0, 130), 5000)).toBe(true);
+  });
+
+  it('is not a repeat for a different card that merely looks alike at thumbnail size', () => {
+    // Differs by more than DUPLICATE_DIFF but less than CHANGED_DIFF: the case that wrongly
+    // blocked a real card swap (measured ~8-9 on device).
+    const similar = stripes(0).map((v, i) => v + (i % 2 === 0 ? 8 : -8));
+    expect(isRepeatOfLastScan(last, similar, 5000)).toBe(false);
+    expect(8).toBeGreaterThan(DUPLICATE_DIFF);
+    expect(8).toBeLessThan(CHANGED_DIFF);
+  });
+
+  it('is never a repeat of nothing, or after the window', () => {
+    expect(isRepeatOfLastScan(null, stripes(0), 5000)).toBe(false);
+    expect(isRepeatOfLastScan(last, stripes(0), 1000 + REPEAT_WINDOW_MS + 1)).toBe(false);
   });
 });

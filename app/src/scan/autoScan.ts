@@ -29,6 +29,17 @@ export const STABLE_SAMPLES = 3;
 /** Minimum time between samples, so a fast camera costs no more than a slow one. */
 export const SAMPLE_INTERVAL_MS = 100;
 
+/**
+ * The phone-side backstop against scanning one card twice (the camera thread's own
+ * memory is lost if the camera restarts): an auto frame this close to the last
+ * auto scan's scene, soon after it, is a repeat. Deliberately much tighter than
+ * CHANGED_DIFF — two different cards on the same background look alike at thumbnail
+ * size (a swap measured only ~8-9 apart), and the camera thread has already decided
+ * a new card arrived, so this must only catch a picture that is practically identical.
+ */
+export const DUPLICATE_DIFF = 3;
+export const REPEAT_WINDOW_MS = 30_000;
+
 export interface AutoScanState {
   /** The previous sample, for spotting motion. */
   prev: number[] | null;
@@ -158,4 +169,14 @@ export function stepAutoScan(state: AutoScanState, thumb: number[], now: number)
     return { trigger: true, still, changed, thumb };
   }
   return { trigger: false, still, changed, thumb };
+}
+
+/** Whether a triggered frame is a repeat of the last auto scan's scene (see DUPLICATE_DIFF). */
+export function isRepeatOfLastScan(
+  last: { scene: number[]; at: number } | null,
+  scene: number[],
+  now: number,
+): boolean {
+  if (!last || now - last.at >= REPEAT_WINDOW_MS) return false;
+  return sceneDistance(scene, last.scene) < DUPLICATE_DIFF;
 }

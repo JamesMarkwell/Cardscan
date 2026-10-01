@@ -32,9 +32,8 @@ import { playKerching } from '../feedback/kerching';
 import { crumb, readCrumbs } from '../debug/breadcrumbs';
 import {
   AutoScanState,
-  CHANGED_DIFF,
   createAutoScanState,
-  sceneDistance,
+  isRepeatOfLastScan,
   sampleThumbnail,
   shouldSample,
   stepAutoScan,
@@ -60,8 +59,6 @@ const CAPTURE_FPS = 10;
 const CAPTURE_TIMEOUT_MS = 6000;
 // Height of the solid control panel at the bottom; the camera view above it is what the card is framed in.
 const PANEL_HEIGHT = 204;
-// An auto frame of the same scene as the last auto scan, this soon after it, is a repeat.
-const REPEAT_WINDOW_MS = 30_000;
 
 // What each pipeline rejection reason means for the person holding the phone.
 const STATUS_TEXT: Record<string, string> = {
@@ -406,10 +403,9 @@ export function ScanScreen({
   const onAutoFrame = useCallback(
     (data: Uint8Array, width: number, height: number, scene: number[]) => {
       if (!mounted.current || !autoRef.current || awaitingCapture.current) return;
-      const previous = lastAutoScene.current;
       const now = Date.now();
-      if (previous != null && now - previous.at < REPEAT_WINDOW_MS && sceneDistance(scene, previous.scene) < CHANGED_DIFF) {
-        crumb('js: auto frame dropped, same scene as the last auto scan');
+      if (isRepeatOfLastScan(lastAutoScene.current, scene, now)) {
+        crumb('js: auto frame dropped, practically identical to the last auto scan');
         return;
       }
       lastAutoScene.current = { scene, at: now };
