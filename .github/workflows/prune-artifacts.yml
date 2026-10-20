@@ -71,3 +71,40 @@ jobs:
               freed += a.size_in_bytes;
             }
             core.info(`${dryRun ? 'Would free' : 'Freed'} ${mb(freed)} MB`);
+
+      # Actions caches count against storage too, and nothing above touches
+      # them. Delete any not used within the cutoff; a live cache that is
+      # still being hit is left alone and rebuilds on a miss anyway.
+      - name: Prune caches
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          MAX_AGE_DAYS: ${{ inputs.max_age_days || '3' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        with:
+          script: |
+            const maxAge = Number(process.env.MAX_AGE_DAYS || 3);
+            const dryRun = process.env.DRY_RUN === 'true';
+            const cutoff = Date.now() - maxAge * 86400000;
+            const mb = (b) => (b / 1048576).toFixed(1);
+
+            const all = await github.paginate(
+              github.rest.actions.getActionsCacheList,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 },
+            );
+            const doomed = all.filter(
+              (c) => new Date(c.last_accessed_at).getTime() < cutoff);
+
+            core.info(`${all.length} caches, ${doomed.length} unused for ${maxAge}+ days`);
+
+            let freed = 0;
+            for (const c of doomed) {
+              core.info(`${dryRun ? 'would delete' : 'deleting'}  ${c.key}  ${mb(c.size_in_bytes)} MB`);
+              if (!dryRun) {
+                await github.rest.actions.deleteActionsCacheById({
+                  owner: context.repo.owner, repo: context.repo.repo, cache_id: c.id,
+                });
+              }
+              freed += c.size_in_bytes;
+            }
+            core.info(`${dryRun ? 'Would free' : 'Freed'} ${mb(freed)} MB of caches`);
